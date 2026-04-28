@@ -24,14 +24,27 @@ interface CanvasToolbarProps {
   className?: string;
 }
 
+function getSelectedCanvasImageIds(canvas: Canvas | null): string[] {
+  if (!canvas) return [];
+
+  return canvas
+    .getActiveObjects()
+    .filter((object): object is FabricImage & { id: string } =>
+      object instanceof FabricImage &&
+      typeof (object as FabricImage & { id?: unknown }).id === "string",
+    )
+    .map((object) => object.id);
+}
+
 export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps) {
   const {
     nodes,
-    selectedNodeId,
+    selectedNodeIds,
     addNode,
     addVersion,
-    removeNode,
+    removeNodes,
     selectNode,
+    selectNodes,
     setAnnotation,
   } = useCanvasContext();
   const { config } = useConfigContext();
@@ -55,33 +68,42 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
     currentAnnotation: "",
   });
 
-  const selectedNode = nodes.find((node) => node.id === selectedNodeId);
+  const selectedCount = selectedNodeIds.length;
+  const selectedNode = selectedCount === 1
+    ? nodes.find((node) => node.id === selectedNodeIds[0]) || null
+    : null;
+  const singleSelectedNodeId = selectedNode?.id || null;
   const sketchMode = config.maskMode ? "mask" : "inpaint";
   const supportsSketchModel = isMaskSupported(config.model);
-  const canUseSketch = Boolean(selectedNodeId) && supportsSketchModel;
-  const sketchTitle = !selectedNodeId
+  const canUseSketch = Boolean(singleSelectedNodeId) && supportsSketchModel;
+  const sketchTitle = !singleSelectedNodeId
     ? "Select an image node first"
     : supportsSketchModel
       ? "Sketch edit uses Nano Banana mask/inpaint"
       : "Sketch requires Nano Banana / gemini-2.5-flash-image";
 
   const handleDelete = useCallback(() => {
-    if (!selectedNodeId) return;
+    const canvasSelectedIds = getSelectedCanvasImageIds(fabricCanvasRef.current);
+    const nodeIds = canvasSelectedIds.length > 0 ? canvasSelectedIds : selectedNodeIds;
+    if (nodeIds.length === 0) return;
 
-    removeNode(selectedNodeId);
+    const removedNodeIds = new Set(nodeIds);
+    removeNodes(nodeIds);
     const canvas = fabricCanvasRef.current;
     if (canvas) {
-      const target = canvas.getObjects().find(
-        (object): object is FabricImage =>
+      canvas.discardActiveObject();
+      canvas.getObjects().forEach((object) => {
+        if (
           object instanceof FabricImage &&
-          (object as FabricImage & { id?: string }).id === selectedNodeId,
-      );
-      if (target) {
-        canvas.remove(target);
-        canvas.renderAll();
-      }
+          removedNodeIds.has((object as FabricImage & { id?: string }).id || "")
+        ) {
+          canvas.remove(object);
+        }
+      });
+      canvas.renderAll();
     }
-  }, [selectedNodeId, removeNode, fabricCanvasRef]);
+    selectNodes([]);
+  }, [fabricCanvasRef, removeNodes, selectedNodeIds, selectNodes]);
 
   const handleDownload = useCallback(() => {
     if (selectedNode) {
@@ -91,14 +113,15 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
 
   const handleClear = useCallback(() => {
     if (confirmClearRef.current) {
-      nodes.forEach((node) => removeNode(node.id));
+      removeNodes(nodes.map((node) => node.id));
       const canvas = fabricCanvasRef.current;
       if (canvas) {
+        canvas.discardActiveObject();
         canvas.getObjects().forEach((object) => canvas.remove(object));
         canvas.renderAll();
       }
       confirmClearRef.current = false;
-      selectNode(null);
+      selectNodes([]);
       return;
     }
 
@@ -109,23 +132,25 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
     confirmTimeoutRef.current = setTimeout(() => {
       confirmClearRef.current = false;
     }, 2000);
-  }, [nodes, removeNode, fabricCanvasRef, selectNode]);
+  }, [nodes, removeNodes, fabricCanvasRef, selectNodes]);
 
   const handleUpload = useCallback(() => {
     fileInputRef.current?.click();
   }, []);
 
   const createUploadedNode = useCallback((file: File, imageData: string, index: number): CanvasNode => {
+    const createdAt = new Date();
+    const nodeId = crypto.randomUUID();
     const versionId = crypto.randomUUID();
     const annotation = file.name.replace(/\.[^.]+$/, "");
 
     return {
-      id: crypto.randomUUID(),
+      id: nodeId,
       imageData,
       position: { x: 120 + index * 36, y: 120 + index * 36 },
       scale: 1,
       rotation: 0,
-      createdAt: new Date(),
+      createdAt,
       prompt: "",
       model: "uploaded",
       tokenUsed: 0,
@@ -135,7 +160,7 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
         {
           id: versionId,
           imageData,
-          createdAt: new Date(),
+          createdAt,
           prompt: "",
           model: "uploaded",
           tokenUsed: 0,
@@ -166,6 +191,16 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
           const node = createUploadedNode(file, imageData, index);
           createdNodes.push(node);
           addNode(node);
+          void archiveGeneratedImage({
+            imageData,
+            prompt: node.annotation || file.name,
+            nodeId: node.id,
+            versionId: node.activeVersionId || `${node.id}-initial`,
+            operation: 'upload',
+            model: 'uploaded',
+            tokenUsed: 0,
+            createdAt: node.createdAt,
+          });
         }
 
         const lastNode = createdNodes[createdNodes.length - 1];
@@ -184,7 +219,7 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
         event.target.value = "";
       }
     },
-    [addNode, createUploadedNode, selectNode],
+    [addNode, archiveGeneratedImage, createUploadedNode, selectNode],
   );
 
   const handleAnnotate = useCallback(() => {
@@ -219,7 +254,7 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
 
   const handleInpaintSubmit = useCallback(
     (resultImageData: string, tokenUsed: number, prompt: string) => {
-      if (!selectedNodeId) return;
+      if (!singleSelectedNodeId) return;
       const createdAt = new Date();
       const versionId = crypto.randomUUID();
 
@@ -232,11 +267,11 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
         tokenUsed,
       };
 
-      addVersion(selectedNodeId, version, true);
+      addVersion(singleSelectedNodeId, version, true);
       void archiveGeneratedImage({
         imageData: resultImageData,
         prompt,
-        nodeId: selectedNodeId,
+        nodeId: singleSelectedNodeId,
         versionId,
         operation: config.maskMode ? 'mask' : 'sketch',
         model: config.model,
@@ -253,7 +288,7 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
       config.model,
       handleSketchCancel,
       recordUsage,
-      selectedNodeId,
+      singleSelectedNodeId,
     ],
   );
 
@@ -264,7 +299,7 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
 
   const handleEditSubmit = useCallback(
     async ({ cropImageData, note }: EditOverlaySubmitPayload) => {
-      if (!selectedNode || !selectedNodeId) return;
+      if (!selectedNode) return;
       if (!hasApiKey()) {
         setEditError("Please configure your API key first");
         return;
@@ -319,11 +354,11 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
           tokenUsed: response.token_used,
         };
 
-        addVersion(selectedNodeId, version, true);
+        addVersion(selectedNode.id, version, true);
         void archiveGeneratedImage({
           imageData: response.image,
           prompt: versionPrompt,
-          nodeId: selectedNodeId,
+          nodeId: selectedNode.id,
           versionId,
           operation: 'edit',
           model: config.model,
@@ -338,7 +373,7 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
         setEditLoading(false);
       }
     },
-    [addVersion, archiveGeneratedImage, config, recordUsage, selectedNode, selectedNodeId],
+    [addVersion, archiveGeneratedImage, config, recordUsage, selectedNode],
   );
 
   useEffect(() => {
@@ -346,6 +381,19 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
       handleSketchCancel();
     }
   }, [handleSketchCancel, showSketch, supportsSketchModel]);
+
+  useEffect(() => {
+    if (showSketch && !selectedNode) {
+      handleSketchCancel();
+    }
+  }, [handleSketchCancel, selectedNode, showSketch]);
+
+  useEffect(() => {
+    if (showEdit && !selectedNode && !editLoading) {
+      setShowEdit(false);
+      setEditError(null);
+    }
+  }, [editLoading, selectedNode, showEdit]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -433,12 +481,12 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
           Upload
         </ToolbarButton>
 
-        <ToolbarButton onClick={handleAnnotate} disabled={!selectedNodeId}>
+        <ToolbarButton onClick={handleAnnotate} disabled={!selectedNode}>
           Annotate
         </ToolbarButton>
 
-        <ToolbarButton onClick={handleDelete} disabled={!selectedNodeId}>
-          Delete
+        <ToolbarButton onClick={handleDelete} disabled={selectedCount === 0}>
+          {selectedCount > 1 ? `Delete (${selectedCount})` : "Delete"}
         </ToolbarButton>
 
         <ToolbarButton onClick={handleDownload} disabled={!selectedNode}>

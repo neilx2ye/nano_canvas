@@ -14,6 +14,7 @@ import { useConfigContext } from './ConfigContext';
 
 type FileSystemPermissionMode = 'read' | 'readwrite';
 type ArchiveOperation = 'generate' | 'regenerate' | 'edit' | 'sketch' | 'mask' | 'upload' | 'snapshot';
+type SerializedArchiveRecord = NonNullable<ProjectConfigDocument['archiveRecords']>[number];
 
 interface FileSystemPermissionDescriptor {
   mode?: FileSystemPermissionMode;
@@ -26,6 +27,7 @@ interface FileSystemWritableFileStreamLike {
 
 interface FileSystemFileHandleLike {
   createWritable: () => Promise<FileSystemWritableFileStreamLike>;
+  getFile: () => Promise<File>;
 }
 
 interface FileSystemDirectoryHandleLike {
@@ -115,7 +117,19 @@ interface ProjectConfigDocument {
     nodes: SerializedCanvasNode[];
     connections: Array<{ fromId: string; toId: string }>;
   };
-  generationRecords: Array<{
+  archiveRecords?: Array<{
+    id: string;
+    operation: ArchiveOperation;
+    nodeId: string;
+    versionId: string;
+    imageFile: string;
+    prompt: string;
+    model: string;
+    tokenUsed: number;
+    createdAt: string;
+    savedAt: string | null;
+  }>;
+  generationRecords?: Array<{
     id: string;
     operation: ArchiveOperation;
     nodeId: string;
@@ -279,9 +293,157 @@ function buildNodeSignature(nodes: CanvasNode[], selectedNodeId: string | null):
   });
 }
 
+function serializeArchiveRecords(records: ArchiveEventRecord[]) {
+  return records
+    .filter((record) => record.status === 'saved')
+    .map((record) => ({
+      id: record.id,
+      operation: record.operation,
+      nodeId: record.nodeId,
+      versionId: record.versionId,
+      imageFile: record.filePath,
+      prompt: record.prompt,
+      model: record.model,
+      tokenUsed: record.tokenUsed,
+      createdAt: record.createdAt,
+      savedAt: record.savedAt || null,
+    }));
+}
+
+function getProjectArchiveRecords(document: ProjectConfigDocument): SerializedArchiveRecord[] {
+  const archiveRecords = document.archiveRecords || [];
+  if (archiveRecords.length > 0) return archiveRecords;
+
+  return document.generationRecords || [];
+}
+
+function isNotFoundError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === 'NotFoundError';
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function readProjectFile(
+  projectHandle: FileSystemDirectoryHandleLike,
+  filePath: string,
+): Promise<File> {
+  const parts = filePath.split(/[\\/]/).filter(Boolean);
+  if (parts.length === 0) {
+    throw new Error('Project file path is empty.');
+  }
+
+  let directoryHandle = projectHandle;
+  for (let index = 0; index < parts.length - 1; index += 1) {
+    directoryHandle = await directoryHandle.getDirectoryHandle(parts[index]);
+  }
+
+  const fileHandle = await directoryHandle.getFileHandle(parts[parts.length - 1]);
+  return fileHandle.getFile();
+}
+
+async function readProjectImageData(
+  projectHandle: FileSystemDirectoryHandleLike,
+  filePath: string,
+): Promise<string> {
+  const file = await readProjectFile(projectHandle, filePath);
+  return blobToDataUrl(file);
+}
+
+async function readProjectConfigDocument(
+  projectHandle: FileSystemDirectoryHandleLike,
+): Promise<ProjectConfigDocument | null> {
+  try {
+    const file = await readProjectFile(projectHandle, CONFIG_FILE_NAME);
+    const document = JSON.parse(await file.text()) as ProjectConfigDocument;
+
+    if (!document.canvas || !Array.isArray(document.canvas.nodes)) {
+      throw new Error('Project config is missing canvas.nodes.');
+    }
+
+    return document;
+  } catch (err) {
+    if (isNotFoundError(err)) {
+      return null;
+    }
+
+    throw err;
+  }
+}
+
+function hydrateArchiveIndexes(document: ProjectConfigDocument): {
+  assets: Record<string, ArchiveAssetRecord>;
+  records: ArchiveEventRecord[];
+} {
+  const assets: Record<string, ArchiveAssetRecord> = {};
+  const records = getProjectArchiveRecords(document).map((record): ArchiveEventRecord => {
+    const fileName = record.imageFile.split(/[\\/]/).filter(Boolean).pop() || record.imageFile;
+    const restoredRecord: ArchiveEventRecord = {
+      id: record.id || crypto.randomUUID(),
+      versionId: record.versionId,
+      nodeId: record.nodeId,
+      fileName,
+      filePath: record.imageFile,
+      prompt: record.prompt,
+      model: record.model,
+      tokenUsed: record.tokenUsed,
+      operation: record.operation,
+      createdAt: record.createdAt,
+      savedAt: record.savedAt || undefined,
+      status: 'saved',
+    };
+
+    assets[record.versionId] = restoredRecord;
+    return restoredRecord;
+  });
+
+  return { assets, records };
+}
+
+function normalizeRestoredConnections(
+  nodes: CanvasNode[],
+  connections: Array<{ fromId: string; toId: string }>,
+): CanvasNode[] {
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const connectedToById = new Map(nodes.map((node) => [node.id, new Set<string>()]));
+  const connectedFromById = new Map<string, string>();
+
+  nodes.forEach((node) => {
+    (node.connectedTo || []).forEach((toId) => {
+      if (nodeIds.has(toId)) {
+        connectedToById.get(node.id)?.add(toId);
+        connectedFromById.set(toId, node.id);
+      }
+    });
+
+    if (node.connectedFrom && nodeIds.has(node.connectedFrom)) {
+      connectedToById.get(node.connectedFrom)?.add(node.id);
+      connectedFromById.set(node.id, node.connectedFrom);
+    }
+  });
+
+  connections.forEach((connection) => {
+    if (!nodeIds.has(connection.fromId) || !nodeIds.has(connection.toId)) return;
+    connectedToById.get(connection.fromId)?.add(connection.toId);
+    connectedFromById.set(connection.toId, connection.fromId);
+  });
+
+  return nodes.map((node) => ({
+    ...node,
+    connectedFrom: connectedFromById.get(node.id),
+    connectedTo: Array.from(connectedToById.get(node.id) || []),
+  }));
+}
+
 export function ProjectArchiveProvider({ children }: { children: React.ReactNode }) {
-  const { nodes, selectedNodeId } = useCanvasContext();
-  const { config } = useConfigContext();
+  const { nodes, selectedNodeId, restoreState } = useCanvasContext();
+  const { config, loadConfig } = useConfigContext();
 
   const projectHandleRef = useRef<FileSystemDirectoryHandleLike | null>(null);
   const assetsRef = useRef<Record<string, ArchiveAssetRecord>>({});
@@ -399,20 +561,8 @@ export function ProjectArchiveProvider({ children }: { children: React.ReactNode
         })),
         connections,
       },
-      generationRecords: generationRecordsRef.current
-        .filter((record) => record.status === 'saved')
-        .map((record) => ({
-          id: record.id,
-          operation: record.operation,
-          nodeId: record.nodeId,
-          versionId: record.versionId,
-          imageFile: record.filePath,
-          prompt: record.prompt,
-          model: record.model,
-          tokenUsed: record.tokenUsed,
-          createdAt: record.createdAt,
-          savedAt: record.savedAt || null,
-        })),
+      archiveRecords: serializeArchiveRecords(generationRecordsRef.current),
+      generationRecords: serializeArchiveRecords(generationRecordsRef.current),
     };
   }, []);
 
@@ -551,6 +701,111 @@ export function ProjectArchiveProvider({ children }: { children: React.ReactNode
     [archiveImage],
   );
 
+  const restoreProjectFromConfig = useCallback(
+    async (projectHandle: FileSystemDirectoryHandleLike): Promise<boolean> => {
+      const document = await readProjectConfigDocument(projectHandle);
+      if (!document) return false;
+
+      const endOperation = startOperation();
+      setError(null);
+
+      try {
+        const { assets, records } = hydrateArchiveIndexes(document);
+        const restoredNodes = await Promise.all(
+          document.canvas.nodes.map(async (node): Promise<CanvasNode> => {
+            const versions = await Promise.all(
+              node.versions.map(async (version): Promise<CanvasNodeVersion> => {
+                const imageFile = version.imageFile || assets[version.id]?.filePath;
+                if (!imageFile) {
+                  throw new Error(`Missing image file for version ${version.id}.`);
+                }
+
+                if (!assets[version.id]) {
+                  const fileName = imageFile.split(/[\\/]/).filter(Boolean).pop() || imageFile;
+                  const restoredRecord: ArchiveEventRecord = {
+                    id: crypto.randomUUID(),
+                    versionId: version.id,
+                    nodeId: node.id,
+                    fileName,
+                    filePath: imageFile,
+                    prompt: version.prompt,
+                    model: version.model,
+                    tokenUsed: version.tokenUsed,
+                    operation: version.archiveOperation || 'snapshot',
+                    createdAt: version.createdAt,
+                    status: 'saved',
+                  };
+
+                  assets[version.id] = restoredRecord;
+                  records.push(restoredRecord);
+                }
+
+                return {
+                  id: version.id,
+                  imageData: await readProjectImageData(projectHandle, imageFile),
+                  createdAt: new Date(version.createdAt),
+                  prompt: version.prompt,
+                  model: version.model,
+                  tokenUsed: version.tokenUsed,
+                };
+              }),
+            );
+            const activeVersion =
+              versions.find((version) => version.id === node.activeVersionId) || versions[0];
+
+            if (!activeVersion) {
+              throw new Error(`Node ${node.id} has no restorable image versions.`);
+            }
+
+            return {
+              id: node.id,
+              imageData: activeVersion.imageData,
+              position: node.position,
+              scale: node.scale,
+              rotation: node.rotation,
+              createdAt: new Date(node.createdAt),
+              prompt: node.prompt,
+              model: node.model,
+              tokenUsed: node.tokenUsed,
+              annotation: node.annotation,
+              activeVersionId: activeVersion.id,
+              versions,
+              connectedFrom: node.connectedFrom || undefined,
+              connectedTo: node.connectedTo || [],
+            };
+          }),
+        );
+
+        const normalizedNodes = normalizeRestoredConnections(
+          restoredNodes,
+          document.canvas.connections || [],
+        );
+        const restoredSelectedNodeId = normalizedNodes.some(
+          (node) => node.id === document.canvas.selectedNodeId,
+        )
+          ? document.canvas.selectedNodeId
+          : null;
+
+        assetsRef.current = assets;
+        generationRecordsRef.current = records;
+        previousNodeSignatureRef.current = buildNodeSignature(
+          normalizedNodes,
+          restoredSelectedNodeId,
+        );
+
+        if (document.generationConfig) {
+          loadConfig(document.generationConfig);
+        }
+        restoreState(normalizedNodes, restoredSelectedNodeId);
+        setLastSavedLabel(`Restored ${CONFIG_FILE_NAME}`);
+        return true;
+      } finally {
+        endOperation();
+      }
+    },
+    [loadConfig, restoreState, startOperation],
+  );
+
   const ensureMissingNodeImagesArchived = useCallback(async () => {
     const projectHandle = projectHandleRef.current;
     if (!projectHandle) return;
@@ -588,6 +843,11 @@ export function ProjectArchiveProvider({ children }: { children: React.ReactNode
         if (!active || !handle) return;
         projectHandleRef.current = handle;
         setProjectName(handle.name);
+        void restoreProjectFromConfig(handle).catch((err) => {
+          if (active) {
+            setError(err instanceof Error ? err.message : 'Could not restore the project state.');
+          }
+        });
       })
       .catch(() => {
         if (active) {
@@ -603,7 +863,7 @@ export function ProjectArchiveProvider({ children }: { children: React.ReactNode
     return () => {
       active = false;
     };
-  }, [isSupported]);
+  }, [isSupported, restoreProjectFromConfig]);
 
   useEffect(() => {
     const signature = buildNodeSignature(nodes, selectedNodeId);
@@ -659,15 +919,18 @@ export function ProjectArchiveProvider({ children }: { children: React.ReactNode
       setProjectName(handle.name);
       setLastSavedLabel(null);
       await storeDirectoryHandle(handle);
-      await ensureMissingNodeImagesArchived();
-      scheduleProjectConfigWrite();
+      const restored = await restoreProjectFromConfig(handle);
+      if (!restored) {
+        await ensureMissingNodeImagesArchived();
+        scheduleProjectConfigWrite();
+      }
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
         return;
       }
       setError(err instanceof Error ? err.message : 'Could not select project folder.');
     }
-  }, [ensureMissingNodeImagesArchived, scheduleProjectConfigWrite]);
+  }, [ensureMissingNodeImagesArchived, restoreProjectFromConfig, scheduleProjectConfigWrite]);
 
   const clearProjectDirectory = useCallback(() => {
     projectHandleRef.current = null;

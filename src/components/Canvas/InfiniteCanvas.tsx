@@ -21,7 +21,7 @@ import {
   type PromptReference,
 } from '../../utils';
 import { sanitizeGenerationConfig } from '../../constants/geminiImageModels';
-import type { CanvasNodeVersion, ModelType } from '../../types';
+import type { CanvasNode, CanvasNodeVersion, ModelType } from '../../types';
 
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 5;
@@ -38,6 +38,52 @@ export interface InfiniteCanvasHandle {
 
 type NodePosition = { x: number; y: number; width: number; height: number };
 type CanvasPoint = { x: number; y: number };
+type IdentifiedFabricImage = FabricImage & { id: string; imageData?: string };
+type FabricObjectCollection = { getObjects: () => unknown[] };
+
+function isIdentifiedFabricImage(object: unknown): object is IdentifiedFabricImage {
+  return object instanceof FabricImage && typeof (object as { id?: unknown }).id === 'string';
+}
+
+function hasObjectCollection(object: unknown): object is FabricObjectCollection {
+  return Boolean(
+    object &&
+      typeof object === 'object' &&
+      typeof (object as { getObjects?: unknown }).getObjects === 'function',
+  );
+}
+
+function getSelectedFabricImages(canvas: Canvas): IdentifiedFabricImage[] {
+  return canvas.getActiveObjects().filter(isIdentifiedFabricImage);
+}
+
+function getFabricImagesFromTarget(target: unknown, canvas: Canvas): IdentifiedFabricImage[] {
+  const targetObjects = hasObjectCollection(target)
+    ? target.getObjects()
+    : target
+      ? [target]
+      : [];
+  const targetImages = targetObjects.filter(isIdentifiedFabricImage);
+
+  return targetImages.length > 0 ? targetImages : getSelectedFabricImages(canvas);
+}
+
+function getNodeTransformUpdate(image: IdentifiedFabricImage): {
+  id: string;
+  updates: Partial<CanvasNode>;
+} {
+  const position = image.getXY();
+  const scale = image.getObjectScaling();
+
+  return {
+    id: image.id,
+    updates: {
+      position: { x: position.x, y: position.y },
+      scale: scale.x || 1,
+      rotation: image.getTotalAngle() || 0,
+    },
+  };
+}
 
 function getNodeCenter(position: NodePosition): CanvasPoint {
   return {
@@ -84,7 +130,9 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
       nodes,
       connectingFromId,
       selectNode,
+      selectNodes,
       updateNode,
+      updateNodes,
       removeNode,
       addVersion,
       selectVersion,
@@ -139,11 +187,12 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
     }, []);
 
     const refreshNodePosition = useCallback((nodeId: string, object: FabricImage) => {
+      const bounds = object.getBoundingRect();
       nodePositionRef.current.set(nodeId, {
-        x: object.left || 0,
-        y: object.top || 0,
-        width: (object.width || NODE_SIZE) * (object.scaleX || 1),
-        height: (object.height || NODE_SIZE) * (object.scaleY || 1),
+        x: bounds.left,
+        y: bounds.top,
+        width: bounds.width || (object.width || NODE_SIZE) * (object.scaleX || 1),
+        height: bounds.height || (object.height || NODE_SIZE) * (object.scaleY || 1),
       });
       scheduleOverlayRefresh();
     }, [scheduleOverlayRefresh]);
@@ -210,6 +259,10 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
       });
 
       const neededIds = new Set(nodes.map((node) => node.id));
+      const activeImages = getSelectedFabricImages(canvas);
+      if (activeImages.some((image) => !neededIds.has(image.id))) {
+        canvas.discardActiveObject();
+      }
 
       nodes.forEach((node) => {
         const existing = existingById.get(node.id);
@@ -218,6 +271,12 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
           : undefined;
 
         if (existing && existingImageData === node.imageData) {
+          if (existing.group && activeImages.includes(existing as IdentifiedFabricImage)) {
+            existing.setCoords();
+            refreshNodePosition(node.id, existing);
+            return;
+          }
+
           existing.set({
             left: node.position.x,
             top: node.position.y,
@@ -308,18 +367,15 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
       if (!canvas) return;
 
       const handleSelection = () => {
-        const activeObject = canvas.getActiveObject();
-        if (activeObject && activeObject instanceof FabricImage) {
-          const id = (activeObject as FabricImage & { id?: string }).id;
-          if (id) {
-            selectNode(id);
-            onNodeSelect?.(id);
-          }
+        const selectedIds = getSelectedFabricImages(canvas).map((image) => image.id);
+        if (selectedIds.length > 0) {
+          selectNodes(selectedIds);
+          onNodeSelect?.(selectedIds[0]);
         }
       };
 
       const handleSelectionCleared = () => {
-        selectNode(null);
+        selectNodes([]);
         onNodeSelect?.(null);
       };
 
@@ -332,39 +388,29 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
         canvas.off('selection:updated', handleSelection);
         canvas.off('selection:cleared', handleSelectionCleared);
       };
-    }, [selectNode, onNodeSelect]);
+    }, [selectNodes, onNodeSelect]);
 
     useEffect(() => {
       const canvas = fabricCanvasRef.current;
       if (!canvas) return;
 
       const handleObjectMoving = (event: { target?: unknown }) => {
-        const target = event.target;
-        if (target && target instanceof FabricImage) {
-          const id = (target as FabricImage & { id?: string }).id;
-          if (id) {
-            target.setCoords();
-            refreshNodePosition(id, target);
-          }
-        }
+        getFabricImagesFromTarget(event.target, canvas).forEach((image) => {
+          image.setCoords();
+          refreshNodePosition(image.id, image);
+        });
         canvas.clearContext(canvas.contextTop);
         canvas.requestRenderAll();
         updateOverlayTransform();
       };
 
       const handleObjectModified = (event: { target?: unknown }) => {
-        const target = event.target;
-        if (target && target instanceof FabricImage) {
-          const id = (target as FabricImage & { id?: string }).id;
-          if (id) {
-            refreshNodePosition(id, target);
-            updateNode(id, {
-              position: { x: target.left || 0, y: target.top || 0 },
-              scale: target.scaleX || 1,
-              rotation: target.angle || 0,
-            });
-          }
-        }
+        const updates = getFabricImagesFromTarget(event.target, canvas).map((image) => {
+          image.setCoords();
+          refreshNodePosition(image.id, image);
+          return getNodeTransformUpdate(image);
+        });
+        updateNodes(updates);
         canvas.clearContext(canvas.contextTop);
         canvas.requestRenderAll();
         updateOverlayTransform();
@@ -377,7 +423,7 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
         canvas.off('object:moving', handleObjectMoving);
         canvas.off('object:modified', handleObjectModified);
       };
-    }, [refreshNodePosition, updateNode, updateOverlayTransform]);
+    }, [refreshNodePosition, updateNodes, updateOverlayTransform]);
 
     const openMenuForObject = useCallback((nodeId: string, x: number, y: number) => {
       selectNode(nodeId);

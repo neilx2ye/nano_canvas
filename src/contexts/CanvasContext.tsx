@@ -1,17 +1,22 @@
-﻿import React, { createContext, useContext, useReducer, useMemo} from 'react';
+﻿import React, { createContext, useCallback, useContext, useReducer, useMemo} from 'react';
 import type { CanvasNode, CanvasNodeVersion } from '../types';
 
 interface CanvasState {
   nodes: CanvasNode[];
   selectedNodeId: string | null;
+  selectedNodeIds: string[];
   connectingFromId: string | null;
 }
 
 type CanvasAction =
   | { type: 'ADD_NODE'; payload: CanvasNode }
+  | { type: 'RESTORE_STATE'; payload: { nodes: CanvasNode[]; selectedNodeId: string | null } }
   | { type: 'UPDATE_NODE'; payload: { id: string; updates: Partial<CanvasNode> } }
+  | { type: 'UPDATE_NODES'; payload: Array<{ id: string; updates: Partial<CanvasNode> }> }
   | { type: 'REMOVE_NODE'; payload: string }
+  | { type: 'REMOVE_NODES'; payload: string[] }
   | { type: 'SELECT_NODE'; payload: string | null }
+  | { type: 'SELECT_NODES'; payload: string[] }
   | { type: 'ADD_VERSION'; payload: { nodeId: string; version: CanvasNodeVersion; activate?: boolean } }
   | { type: 'SELECT_VERSION'; payload: { nodeId: string; versionId: string } }
   | { type: 'SET_ANNOTATION'; payload: { nodeId: string; annotation: string } }
@@ -24,11 +29,16 @@ type CanvasAction =
 export interface CanvasContextValue {
   nodes: CanvasNode[];
   selectedNodeId: string | null;
+  selectedNodeIds: string[];
   connectingFromId: string | null;
   addNode: (node: CanvasNode) => void;
+  restoreState: (nodes: CanvasNode[], selectedNodeId: string | null) => void;
   updateNode: (id: string, updates: Partial<CanvasNode>) => void;
+  updateNodes: (updates: Array<{ id: string; updates: Partial<CanvasNode> }>) => void;
   removeNode: (id: string) => void;
+  removeNodes: (ids: string[]) => void;
   selectNode: (id: string | null) => void;
+  selectNodes: (ids: string[]) => void;
   addVersion: (nodeId: string, version: CanvasNodeVersion, activate?: boolean) => void;
   selectVersion: (nodeId: string, versionId: string) => void;
   setAnnotation: (nodeId: string, annotation: string) => void;
@@ -58,6 +68,47 @@ function getNodeVersions(node: CanvasNode): CanvasNodeVersion[] {
   ];
 }
 
+function dedupeNodeIds(ids: string[], nodes: CanvasNode[]): string[] {
+  const validNodeIds = new Set(nodes.map((node) => node.id));
+  const selectedIds: string[] = [];
+
+  ids.forEach((id) => {
+    if (!validNodeIds.has(id) || selectedIds.includes(id)) return;
+    selectedIds.push(id);
+  });
+
+  return selectedIds;
+}
+
+function removeNodeIds(state: CanvasState, nodeIds: string[]): CanvasState {
+  const removedNodeIds = new Set(nodeIds);
+  if (removedNodeIds.size === 0) return state;
+
+  const nodes = state.nodes
+    .filter((node) => !removedNodeIds.has(node.id))
+    .map((node) => ({
+      ...node,
+      connectedTo: node.connectedTo?.filter((id) => !removedNodeIds.has(id)),
+      connectedFrom: node.connectedFrom && removedNodeIds.has(node.connectedFrom)
+        ? undefined
+        : node.connectedFrom,
+    }));
+  const selectedNodeIds = state.selectedNodeIds.filter((id) => !removedNodeIds.has(id));
+  const selectedNodeId = state.selectedNodeId && !removedNodeIds.has(state.selectedNodeId)
+    ? state.selectedNodeId
+    : selectedNodeIds[0] || null;
+
+  return {
+    ...state,
+    nodes,
+    selectedNodeId,
+    selectedNodeIds,
+    connectingFromId: state.connectingFromId && removedNodeIds.has(state.connectingFromId)
+      ? null
+      : state.connectingFromId,
+  };
+}
+
 function canvasReducer(state: CanvasState, action: CanvasAction): CanvasState {
   switch (action.type) {
     case 'ADD_NODE':
@@ -65,7 +116,22 @@ function canvasReducer(state: CanvasState, action: CanvasAction): CanvasState {
         ...state,
         nodes: [...state.nodes, action.payload],
         selectedNodeId: action.payload.id,
+        selectedNodeIds: [action.payload.id],
       };
+
+    case 'RESTORE_STATE': {
+      const selectedNodeIds = dedupeNodeIds(
+        action.payload.selectedNodeId ? [action.payload.selectedNodeId] : [],
+        action.payload.nodes,
+      );
+
+      return {
+        nodes: action.payload.nodes,
+        selectedNodeId: selectedNodeIds[0] || null,
+        selectedNodeIds,
+        connectingFromId: null,
+      };
+    }
 
     case 'UPDATE_NODE':
       return {
@@ -77,27 +143,42 @@ function canvasReducer(state: CanvasState, action: CanvasAction): CanvasState {
         ),
       };
 
-    case 'REMOVE_NODE': {
-      const nodeId = action.payload;
+    case 'UPDATE_NODES': {
+      const updatesById = new Map(
+        action.payload.map(({ id, updates }) => [id, updates]),
+      );
+      if (updatesById.size === 0) return state;
+
       return {
         ...state,
-        nodes: state.nodes
-          .filter((node) => node.id !== nodeId)
-          .map((node) => ({
-            ...node,
-            connectedTo: node.connectedTo?.filter((id) => id !== nodeId),
-            connectedFrom: node.connectedFrom === nodeId ? undefined : node.connectedFrom,
-          })),
-        selectedNodeId: state.selectedNodeId === nodeId ? null : state.selectedNodeId,
-        connectingFromId: state.connectingFromId === nodeId ? null : state.connectingFromId,
+        nodes: state.nodes.map((node) => {
+          const updates = updatesById.get(node.id);
+          return updates ? { ...node, ...updates } : node;
+        }),
       };
     }
+
+    case 'REMOVE_NODE':
+      return removeNodeIds(state, [action.payload]);
+
+    case 'REMOVE_NODES':
+      return removeNodeIds(state, action.payload);
 
     case 'SELECT_NODE':
       return {
         ...state,
         selectedNodeId: action.payload,
+        selectedNodeIds: action.payload ? [action.payload] : [],
       };
+
+    case 'SELECT_NODES': {
+      const selectedNodeIds = dedupeNodeIds(action.payload, state.nodes);
+      return {
+        ...state,
+        selectedNodeId: selectedNodeIds[0] || null,
+        selectedNodeIds,
+      };
+    }
 
     case 'ADD_VERSION':
       return {
@@ -259,6 +340,7 @@ function canvasReducer(state: CanvasState, action: CanvasAction): CanvasState {
 const initialState: CanvasState = {
   nodes: [],
   selectedNodeId: null,
+  selectedNodeIds: [],
   connectingFromId: null,
 };
 
@@ -270,17 +352,26 @@ interface CanvasProviderProps {
 
 function CanvasProvider({ children }: CanvasProviderProps) {
   const [state, dispatch] = useReducer(canvasReducer, initialState);
+  const restoreState = useCallback((nodes: CanvasNode[], selectedNodeId: string | null) => {
+    dispatch({ type: 'RESTORE_STATE', payload: { nodes, selectedNodeId } });
+  }, []);
 
   const contextValue = useMemo<CanvasContextValue>(
     () => ({
       nodes: state.nodes,
       selectedNodeId: state.selectedNodeId,
+      selectedNodeIds: state.selectedNodeIds,
       connectingFromId: state.connectingFromId,
       addNode: (node: CanvasNode) => dispatch({ type: 'ADD_NODE', payload: node }),
+      restoreState,
       updateNode: (id: string, updates: Partial<CanvasNode>) =>
         dispatch({ type: 'UPDATE_NODE', payload: { id, updates } }),
+      updateNodes: (updates: Array<{ id: string; updates: Partial<CanvasNode> }>) =>
+        dispatch({ type: 'UPDATE_NODES', payload: updates }),
       removeNode: (id: string) => dispatch({ type: 'REMOVE_NODE', payload: id }),
+      removeNodes: (ids: string[]) => dispatch({ type: 'REMOVE_NODES', payload: ids }),
       selectNode: (id: string | null) => dispatch({ type: 'SELECT_NODE', payload: id }),
+      selectNodes: (ids: string[]) => dispatch({ type: 'SELECT_NODES', payload: ids }),
       addVersion: (nodeId: string, version: CanvasNodeVersion, activate?: boolean) =>
         dispatch({ type: 'ADD_VERSION', payload: { nodeId, version, activate } }),
       selectVersion: (nodeId: string, versionId: string) =>
@@ -305,7 +396,7 @@ function CanvasProvider({ children }: CanvasProviderProps) {
         };
       },
     }),
-    [state.nodes, state.selectedNodeId, state.connectingFromId]
+    [restoreState, state.nodes, state.selectedNodeId, state.selectedNodeIds, state.connectingFromId]
   );
 
   return (

@@ -5,6 +5,7 @@ import { sanitizeGenerationConfig } from '../constants/geminiImageModels';
 export interface ConfigContextValue {
   config: GenerationConfig;
   updateConfig: (updates: Partial<GenerationConfig>) => void;
+  loadConfig: (nextConfig: Partial<GenerationConfig>) => void;
   resetConfig: () => void;
 }
 
@@ -23,12 +24,15 @@ const DEFAULT_CONFIG: GenerationConfig = {
 
 type ConfigAction =
   | { type: 'UPDATE_CONFIG'; payload: Partial<GenerationConfig> }
+  | { type: 'LOAD_CONFIG'; payload: Partial<GenerationConfig> }
   | { type: 'RESET_CONFIG' };
 
 function configReducer(state: GenerationConfig, action: ConfigAction): GenerationConfig {
   switch (action.type) {
     case 'UPDATE_CONFIG':
       return sanitizeGenerationConfig({ ...state, ...action.payload });
+    case 'LOAD_CONFIG':
+      return sanitizeGenerationConfig({ ...DEFAULT_CONFIG, ...action.payload });
     case 'RESET_CONFIG':
       return DEFAULT_CONFIG;
     default:
@@ -45,12 +49,16 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
     dispatch({ type: 'UPDATE_CONFIG', payload: updates });
   }, []);
 
+  const loadConfig = useCallback((nextConfig: Partial<GenerationConfig>) => {
+    dispatch({ type: 'LOAD_CONFIG', payload: nextConfig });
+  }, []);
+
   const resetConfig = useCallback(() => {
     dispatch({ type: 'RESET_CONFIG' });
   }, []);
 
   return (
-    <ConfigContext.Provider value={{ config, updateConfig, resetConfig }}>
+    <ConfigContext.Provider value={{ config, updateConfig, loadConfig, resetConfig }}>
       {children}
     </ConfigContext.Provider>
   );
