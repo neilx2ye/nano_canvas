@@ -4,6 +4,7 @@ import { FabricImage, type Canvas } from "fabric";
 import { SketchOverlay, SketchPromptInput } from "../Sketch";
 import { ImageAnnotationModal } from "./ImageAnnotationModal";
 import { useCanvasContext, useConfigContext, useTokenContext } from "../../contexts";
+import { isMaskSupported } from "../../services/nanoBananaApi";
 import { downloadNodeImage, fileToBase64, validateImageFile } from "../../utils";
 import type { CanvasNode, CanvasNodeVersion } from "../../types";
 
@@ -41,7 +42,13 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId);
   const sketchMode = config.maskMode ? "mask" : "inpaint";
-  const canUseSketch = Boolean(selectedNodeId) && (!config.maskMode || config.model === "nano-banana");
+  const supportsSketchModel = isMaskSupported(config.model);
+  const canUseSketch = Boolean(selectedNodeId) && supportsSketchModel;
+  const sketchTitle = !selectedNodeId
+    ? "Select an image node first"
+    : supportsSketchModel
+      ? "Sketch edit uses Nano Banana mask/inpaint"
+      : "Sketch requires Nano Banana / gemini-2.5-flash-image";
 
   const handleDelete = useCallback(() => {
     if (!selectedNodeId) return;
@@ -221,6 +228,12 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
   }, []);
 
   useEffect(() => {
+    if (showSketch && !supportsSketchModel) {
+      handleSketchCancel();
+    }
+  }, [handleSketchCancel, showSketch, supportsSketchModel]);
+
+  useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.code !== "Delete" && event.code !== "Backspace") return;
       if (
@@ -253,15 +266,18 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
     disabled,
     children,
     variant = "default",
+    title,
   }: {
     onClick?: () => void;
     disabled?: boolean;
     children: ReactNode;
     variant?: "default" | "primary";
+    title?: string;
   }) => (
     <button
       onClick={onClick}
       disabled={disabled}
+      title={title}
       className={`
         px-4 py-2 text-sm font-sans font-normal rounded-pill border transition-colors
         ${variant === "primary"
@@ -315,7 +331,11 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
           Download
         </ToolbarButton>
 
-        <ToolbarButton onClick={() => setShowSketch(true)} disabled={!canUseSketch}>
+        <ToolbarButton
+          onClick={() => setShowSketch(true)}
+          disabled={!canUseSketch}
+          title={sketchTitle}
+        >
           {config.maskMode ? "Mask" : "Sketch"}
         </ToolbarButton>
 
