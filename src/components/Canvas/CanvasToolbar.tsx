@@ -1,10 +1,16 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import type { ChangeEvent, ReactNode, RefObject } from "react";
 import { FabricImage, type Canvas } from "fabric";
-import { SketchOverlay, SketchPromptInput } from "../Sketch";
+import { EditOverlay, SketchOverlay, SketchPromptInput, type EditOverlaySubmitPayload } from "../Sketch";
 import { ImageAnnotationModal } from "./ImageAnnotationModal";
 import { useCanvasContext, useConfigContext, useTokenContext } from "../../contexts";
-import { isMaskSupported } from "../../services/nanoBananaApi";
+import {
+  generateImage,
+  generateImageWithThinking,
+  hasApiKey,
+  isMaskSupported,
+  isThinkingSupported,
+} from "../../services/nanoBananaApi";
 import { downloadNodeImage, fileToBase64, validateImageFile } from "../../utils";
 import type { CanvasNode, CanvasNodeVersion } from "../../types";
 
@@ -33,6 +39,9 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
   const [showSketch, setShowSketch] = useState(false);
   const [sketchStep, setSketchStep] = useState<"draw" | "prompt">("draw");
   const [maskData, setMaskData] = useState<string | null>(null);
+  const [showEdit, setShowEdit] = useState(false);
+  const [editLoading, setEditLoading] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [annotationState, setAnnotationState] = useState({
     visible: false,
@@ -227,6 +236,72 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
     setMaskData(null);
   }, []);
 
+  const handleEditSubmit = useCallback(
+    async ({ cropImageData, note }: EditOverlaySubmitPayload) => {
+      if (!selectedNode || !selectedNodeId) return;
+      if (!hasApiKey()) {
+        setEditError("Please configure your API key first");
+        return;
+      }
+
+      setEditLoading(true);
+      setEditError(null);
+
+      try {
+        const prompt = [
+          "Image 1 is the original image.",
+          "Image 2 is a cropped region taken from Image 1. This crop is the exact area to edit.",
+          `Modification note: ${note}`,
+          "Apply the modification to the matching region in Image 1. Keep everything outside that region unchanged.",
+        ].join("\n");
+        const useThinking =
+          isThinkingSupported(config.model) &&
+          config.thinkingLevel &&
+          config.thinkingLevel !== "off";
+
+        const response = useThinking
+          ? await generateImageWithThinking({
+              model: config.model,
+              prompt,
+              aspect_ratio: config.aspectRatio,
+              image_size: config.imageSize,
+              width: config.width,
+              height: config.height,
+              ref_images: [selectedNode.imageData, cropImageData],
+              thinkingLevel: config.thinkingLevel !== "off" ? config.thinkingLevel : undefined,
+              thinkingBudget: config.thinkingBudget,
+            })
+          : await generateImage({
+              model: config.model,
+              prompt,
+              aspect_ratio: config.aspectRatio,
+              image_size: config.imageSize,
+              width: config.width,
+              height: config.height,
+              ref_images: [selectedNode.imageData, cropImageData],
+            });
+
+        const version: CanvasNodeVersion = {
+          id: crypto.randomUUID(),
+          imageData: response.image,
+          createdAt: new Date(),
+          prompt: `Edit region: ${note}`,
+          model: config.model,
+          tokenUsed: response.token_used,
+        };
+
+        addVersion(selectedNodeId, version, true);
+        recordUsage(response.token_used);
+        setShowEdit(false);
+      } catch (err) {
+        setEditError(err instanceof Error ? err.message : "Edit generation failed");
+      } finally {
+        setEditLoading(false);
+      }
+    },
+    [addVersion, config, recordUsage, selectedNode, selectedNodeId],
+  );
+
   useEffect(() => {
     if (showSketch && !supportsSketchModel) {
       handleSketchCancel();
@@ -332,6 +407,17 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
         </ToolbarButton>
 
         <ToolbarButton
+          onClick={() => {
+            setEditError(null);
+            setShowEdit(true);
+          }}
+          disabled={!selectedNode}
+          title={!selectedNode ? "Select an image node first" : "Circle a local area and describe the edit"}
+        >
+          Edit
+        </ToolbarButton>
+
+        <ToolbarButton
           onClick={() => setShowSketch(true)}
           disabled={!canUseSketch}
           title={sketchTitle}
@@ -356,6 +442,21 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
           mode={sketchMode}
           onComplete={handleSketchComplete}
           onCancel={handleSketchCancel}
+        />
+      )}
+
+      {showEdit && selectedNode && (
+        <EditOverlay
+          originalImageData={selectedNode.imageData}
+          loading={editLoading}
+          error={editError}
+          onSubmit={handleEditSubmit}
+          onCancel={() => {
+            if (!editLoading) {
+              setShowEdit(false);
+              setEditError(null);
+            }
+          }}
         />
       )}
 
