@@ -43,6 +43,78 @@ export function canvasToBase64(canvas: HTMLCanvasElement, quality?: number): str
 }
 
 /**
+ * Convert a base64 data URL to a Blob for writing to disk.
+ */
+export function dataUrlToBlob(dataUrl: string): Blob {
+  const match = dataUrl.match(/^data:([^;]+);base64,(.*)$/);
+  if (!match) {
+    throw new Error('Invalid image data URL');
+  }
+
+  const [, mimeType, base64Data] = match;
+  const binary = atob(base64Data);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return new Blob([bytes], { type: mimeType });
+}
+
+export function getImageExtension(imageData: string): string {
+  const mimeType = imageData.match(/^data:([^;]+);base64,/)?.[1];
+
+  switch (mimeType) {
+    case 'image/jpeg':
+    case 'image/jpg':
+      return 'jpg';
+    case 'image/webp':
+      return 'webp';
+    case 'image/png':
+    default:
+      return 'png';
+  }
+}
+
+function formatTimestamp(date: Date): string {
+  const pad = (value: number, length = 2) => String(value).padStart(length, '0');
+
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+    '_',
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds()),
+    '_',
+    pad(date.getMilliseconds(), 3),
+  ].join('');
+}
+
+function sanitizeFilenamePart(value: string): string {
+  return value
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '')
+    .replace(/\s+/g, '_')
+    .slice(0, 36);
+}
+
+export function buildImageFilename(
+  imageData: string,
+  prompt: string,
+  createdAt = new Date(),
+  prefix = 'nano_canvas',
+): string {
+  const promptPrefix = sanitizeFilenamePart(prompt) || 'image';
+  const timestamp = formatTimestamp(createdAt);
+  const uniqueId = crypto.randomUUID().slice(0, 8);
+  const extension = getImageExtension(imageData);
+
+  return `${prefix}_${timestamp}_${uniqueId}_${promptPrefix}.${extension}`;
+}
+
+/**
  * Trigger browser download for base64 image data.
  */
 export function downloadImage(base64Data: string, filename: string): void {
@@ -58,8 +130,6 @@ export function downloadImage(base64Data: string, filename: string): void {
  * Download a generated image node with timestamp and prompt prefix.
  */
 export function downloadNodeImage(imageData: string, prompt: string): void {
-  const promptPrefix = prompt.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '').slice(0, 20);
-  const timestamp = Date.now();
-  const filename = `nano_canvas_${timestamp}_${promptPrefix || 'image'}.png`;
+  const filename = buildImageFilename(imageData, prompt);
   downloadImage(imageData, filename);
 }

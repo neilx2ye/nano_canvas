@@ -5,7 +5,7 @@ import {
   ParamControls,
   TokenDisplay,
 } from "../components/Controls";
-import { ApiKeyConfig } from "../components/Settings";
+import { ApiKeyConfig, AutoSaveFolder } from "../components/Settings";
 import { PromptInput as MainPromptInput, RefImageUpload } from "../components/Prompt";
 import { InfiniteCanvas, CanvasToolbar } from "../components/Canvas";
 import type { InfiniteCanvasHandle } from "../components/Canvas";
@@ -61,6 +61,8 @@ function MainPage() {
         <aside className={`${mobileTab === "canvas" ? "hidden md:block" : ""} w-[340px] bg-snow border-r border-light-gray overflow-y-auto shrink-0`}>
           <div className="p-6 flex flex-col gap-6">
             <ApiKeyConfig />
+            <div className="h-px bg-light-gray" />
+            <AutoSaveFolder />
             <div className="h-px bg-light-gray" />
             <ModelSelector />
             <div className="h-px bg-light-gray" />

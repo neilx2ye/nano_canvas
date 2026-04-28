@@ -1,6 +1,11 @@
 import { useRef, useEffect, forwardRef, useImperativeHandle, useState, useCallback } from 'react';
 import { Canvas, FabricImage, Point, type TPointerEventInfo, type TPointerEvent } from 'fabric';
-import { useCanvasContext, useConfigContext, useTokenContext } from '../../contexts';
+import {
+  useAutoSaveContext,
+  useCanvasContext,
+  useConfigContext,
+  useTokenContext,
+} from '../../contexts';
 import { ImageNodeMenu } from './ImageNodeMenu';
 import { ImageAnnotationModal } from './ImageAnnotationModal';
 import {
@@ -93,6 +98,7 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
 
     const { config } = useConfigContext();
     const { recordUsage } = useTokenContext();
+    const { saveGeneratedImage } = useAutoSaveContext();
 
     const [menuState, setMenuState] = useState({
       visible: false,
@@ -613,22 +619,24 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
                 ref_images: refImages,
               });
 
+          const createdAt = new Date();
           const version: CanvasNodeVersion = {
             id: crypto.randomUUID(),
             imageData: response.image,
-            createdAt: new Date(),
+            createdAt,
             prompt,
             model,
             tokenUsed: response.token_used,
           };
 
           addVersion(node.id, version, true);
+          void saveGeneratedImage(response.image, prompt, { createdAt });
           recordUsage(response.token_used);
         } finally {
           setRegeneratingNodeId(null);
         }
       },
-      [addVersion, config, getNodeById, menuState.nodeId, nodes, recordUsage],
+      [addVersion, config, getNodeById, menuState.nodeId, nodes, recordUsage, saveGeneratedImage],
     );
 
     const handleMenuDelete = useCallback(() => {

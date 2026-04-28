@@ -4,7 +4,12 @@
  */
 
 import { useState, useCallback, type KeyboardEvent } from "react";
-import { useConfigContext, useCanvasContext, useTokenContext } from "../../contexts";
+import {
+  useAutoSaveContext,
+  useConfigContext,
+  useCanvasContext,
+  useTokenContext,
+} from "../../contexts";
 import { generateImage, generateImageWithThinking, hasApiKey, isThinkingSupported } from "../../services/nanoBananaApi";
 import { Spinner } from "../common";
 import type { CanvasNode, ThinkingStep } from "../../types";
@@ -19,6 +24,7 @@ export function PromptInput() {
   const { config, updateConfig } = useConfigContext();
   const { nodes, addNode, selectedNodeId } = useCanvasContext();
   const { recordUsage } = useTokenContext();
+  const { saveGeneratedImage } = useAutoSaveContext();
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -91,6 +97,7 @@ export function PromptInput() {
         });
       }
 
+      const createdAt = new Date();
       const versionId = crypto.randomUUID();
       const newNode: CanvasNode = {
         id: crypto.randomUUID(),
@@ -98,7 +105,7 @@ export function PromptInput() {
         position: { x: Math.random() * 200 + 100, y: Math.random() * 200 + 100 },
         scale: 1,
         rotation: 0,
-        createdAt: new Date(),
+        createdAt,
         prompt: config.prompt,
         model: config.model,
         tokenUsed: response.token_used,
@@ -107,7 +114,7 @@ export function PromptInput() {
           {
             id: versionId,
             imageData: response.image,
-            createdAt: new Date(),
+            createdAt,
             prompt: config.prompt,
             model: config.model,
             tokenUsed: response.token_used,
@@ -116,6 +123,7 @@ export function PromptInput() {
       };
 
       addNode(newNode);
+      void saveGeneratedImage(response.image, config.prompt, { createdAt });
       recordUsage(response.token_used);
       updateConfig({ prompt: "" });
 
@@ -126,7 +134,7 @@ export function PromptInput() {
     } finally {
       setLoading(false);
     }
-  }, [config, addNode, recordUsage, updateConfig, getGenerationReferences]);
+  }, [config, addNode, recordUsage, saveGeneratedImage, updateConfig, getGenerationReferences]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
