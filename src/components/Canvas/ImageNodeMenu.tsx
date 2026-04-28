@@ -11,7 +11,7 @@ export interface ImageNodeMenuProps {
   onClose: () => void;
   onAnnotate: () => void;
   onStartConnection: () => void;
-  onCompleteConnection: () => void;
+  onCompleteConnection: (keepConnecting?: boolean) => void;
   onCancelConnection: () => void;
   onRemoveConnections: () => void;
   onRegenerate: (model: ModelType, prompt: string) => Promise<void>;
@@ -117,7 +117,7 @@ export function ImageNodeMenu({
 
           {connectingFromId && !isConnectingFromThisNode && (
             <button
-              onClick={onCompleteConnection}
+              onClick={(event) => onCompleteConnection(event.ctrlKey || event.metaKey)}
               className="w-full px-3 py-2 text-sm font-sans text-left text-near-black rounded-container hover:bg-snow transition-colors"
             >
               Connect After Selected Start

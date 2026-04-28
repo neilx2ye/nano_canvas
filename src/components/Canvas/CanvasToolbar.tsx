@@ -81,6 +81,7 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
     : supportsSketchModel
       ? "Sketch edit uses Nano Banana mask/inpaint"
       : "Sketch requires Nano Banana / gemini-2.5-flash-image";
+  const isFocusedOverlayOpen = showSketch || showEdit;
 
   const handleDelete = useCallback(() => {
     const canvasSelectedIds = getSelectedCanvasImageIds(fabricCanvasRef.current);
@@ -465,59 +466,61 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
         className="hidden"
       />
 
-      <div
-        className={className}
-        style={{
-          position: "absolute",
-          top: 16,
-          left: 16,
-          zIndex: 100,
-          display: "flex",
-          gap: 8,
-          flexWrap: "wrap",
-        }}
-      >
-        <ToolbarButton onClick={handleUpload} variant="primary">
-          Upload
-        </ToolbarButton>
-
-        <ToolbarButton onClick={handleAnnotate} disabled={!selectedNode}>
-          Annotate
-        </ToolbarButton>
-
-        <ToolbarButton onClick={handleDelete} disabled={selectedCount === 0}>
-          {selectedCount > 1 ? `Delete (${selectedCount})` : "Delete"}
-        </ToolbarButton>
-
-        <ToolbarButton onClick={handleDownload} disabled={!selectedNode}>
-          Download
-        </ToolbarButton>
-
-        <ToolbarButton
-          onClick={() => {
-            setEditError(null);
-            setShowEdit(true);
+      {!isFocusedOverlayOpen && (
+        <div
+          className={className}
+          style={{
+            position: "absolute",
+            top: 16,
+            left: 16,
+            zIndex: 100,
+            display: "flex",
+            gap: 8,
+            flexWrap: "wrap",
           }}
-          disabled={!selectedNode}
-          title={!selectedNode ? "Select an image node first" : "Circle a local area and describe the edit"}
         >
-          Edit
-        </ToolbarButton>
+          <ToolbarButton onClick={handleUpload} variant="primary">
+            Upload
+          </ToolbarButton>
 
-        <ToolbarButton
-          onClick={() => setShowSketch(true)}
-          disabled={!canUseSketch}
-          title={sketchTitle}
-        >
-          {config.maskMode ? "Mask" : "Sketch"}
-        </ToolbarButton>
+          <ToolbarButton onClick={handleAnnotate} disabled={!selectedNode}>
+            Annotate
+          </ToolbarButton>
 
-        <ToolbarButton onClick={handleClear} disabled={nodes.length === 0}>
-          {confirmClearRef.current ? "Confirm Clear" : "Clear"}
-        </ToolbarButton>
-      </div>
+          <ToolbarButton onClick={handleDelete} disabled={selectedCount === 0}>
+            {selectedCount > 1 ? `Delete (${selectedCount})` : "Delete"}
+          </ToolbarButton>
 
-      {uploadError && (
+          <ToolbarButton onClick={handleDownload} disabled={!selectedNode}>
+            Download
+          </ToolbarButton>
+
+          <ToolbarButton
+            onClick={() => {
+              setEditError(null);
+              setShowEdit(true);
+            }}
+            disabled={!selectedNode}
+            title={!selectedNode ? "Select an image node first" : "Circle a local area and describe the edit"}
+          >
+            Edit
+          </ToolbarButton>
+
+          <ToolbarButton
+            onClick={() => setShowSketch(true)}
+            disabled={!canUseSketch}
+            title={sketchTitle}
+          >
+            {config.maskMode ? "Mask" : "Sketch"}
+          </ToolbarButton>
+
+          <ToolbarButton onClick={handleClear} disabled={nodes.length === 0}>
+            {confirmClearRef.current ? "Confirm Clear" : "Clear"}
+          </ToolbarButton>
+        </div>
+      )}
+
+      {uploadError && !isFocusedOverlayOpen && (
         <div className="absolute top-16 left-4 z-50 px-3 py-2 rounded-container border border-border-light bg-white text-xs font-sans text-stone shadow-lg">
           {uploadError}
         </div>

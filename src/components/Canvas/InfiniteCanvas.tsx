@@ -125,6 +125,7 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
     const nodePositionRef = useRef<Map<string, NodePosition>>(new Map());
     const overlayFrameRef = useRef<number | null>(null);
     const loadingNodeIdsRef = useRef<Set<string>>(new Set());
+    const keepConnectingUntilKeyUpRef = useRef(false);
 
     const {
       nodes,
@@ -168,6 +169,11 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
     const closeMenu = useCallback(() => {
       setMenuState({ visible: false, nodeId: null, position: { x: 0, y: 0 } });
     }, []);
+
+    const cancelActiveConnection = useCallback(() => {
+      keepConnectingUntilKeyUpRef.current = false;
+      cancelConnection();
+    }, [cancelConnection]);
 
     const updateOverlayTransform = useCallback(() => {
       const canvas = fabricCanvasRef.current;
@@ -436,12 +442,13 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
       });
     }, [selectNode, onNodeSelect]);
 
-    const selectOrConnectNode = useCallback((nodeId: string) => {
+    const selectOrConnectNode = useCallback((nodeId: string, keepConnecting = false) => {
       selectNode(nodeId);
       onNodeSelect?.(nodeId);
 
       if (connectingFromId && connectingFromId !== nodeId) {
-        completeConnection(nodeId);
+        keepConnectingUntilKeyUpRef.current = keepConnecting;
+        completeConnection(nodeId, { keepConnecting });
         closeMenu();
       }
     }, [closeMenu, completeConnection, connectingFromId, selectNode, onNodeSelect]);
@@ -527,6 +534,12 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
           isPanningRef.current = false;
           canvas.renderAll();
         }
+        if (
+          (event.key === 'Control' || event.key === 'Meta') &&
+          keepConnectingUntilKeyUpRef.current
+        ) {
+          cancelActiveConnection();
+        }
       };
 
       const handleMouseDown = (eventInfo: TPointerEventInfo<TPointerEvent>) => {
@@ -586,7 +599,7 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
 
         const start = clickStartRef.current;
         if (!wasPanning && !hasDraggedRef.current && event.button === 0 && start?.targetId) {
-          selectOrConnectNode(start.targetId);
+          selectOrConnectNode(start.targetId, event.ctrlKey || event.metaKey);
         }
         clickStartRef.current = null;
       };
@@ -604,7 +617,7 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
         canvas.off('mouse:move', handleMouseMove);
         canvas.off('mouse:up', handleMouseUp);
       };
-    }, [closeMenu, menuState.visible, selectOrConnectNode, updateOverlayTransform]);
+    }, [cancelActiveConnection, closeMenu, menuState.visible, selectOrConnectNode, updateOverlayTransform]);
 
     const handleMenuAnnotate = useCallback(() => {
       const node = menuState.nodeId ? getNodeById(menuState.nodeId) : null;
@@ -830,7 +843,7 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
         {connectingFromId && (
           <div className="absolute bottom-6 right-6 z-50 bg-white text-near-black px-4 py-2 rounded-container border border-border-light shadow-lg text-sm font-sans flex items-center gap-3">
             <span>Click another image node to connect</span>
-            <button onClick={cancelConnection} className="underline hover:no-underline">
+            <button onClick={cancelActiveConnection} className="underline hover:no-underline">
               Cancel
             </button>
           </div>
@@ -849,15 +862,17 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
               handleMenuAnnotate();
             }}
             onStartConnection={() => {
+              keepConnectingUntilKeyUpRef.current = false;
               startConnection(menuState.nodeId!);
               closeMenu();
             }}
-            onCompleteConnection={() => {
-              completeConnection(menuState.nodeId!);
+            onCompleteConnection={(keepConnecting) => {
+              keepConnectingUntilKeyUpRef.current = Boolean(keepConnecting);
+              completeConnection(menuState.nodeId!, { keepConnecting });
               closeMenu();
             }}
             onCancelConnection={() => {
-              cancelConnection();
+              cancelActiveConnection();
               closeMenu();
             }}
             onRemoveConnections={() => {

@@ -21,7 +21,7 @@ type CanvasAction =
   | { type: 'SELECT_VERSION'; payload: { nodeId: string; versionId: string } }
   | { type: 'SET_ANNOTATION'; payload: { nodeId: string; annotation: string } }
   | { type: 'START_CONNECTION'; payload: string }
-  | { type: 'COMPLETE_CONNECTION'; payload: string }
+  | { type: 'COMPLETE_CONNECTION'; payload: { toId: string; keepConnecting?: boolean } }
   | { type: 'CANCEL_CONNECTION' }
   | { type: 'REMOVE_CONNECTION'; payload: { fromId: string; toId: string } }
   | { type: 'REMOVE_ALL_CONNECTIONS'; payload: string };
@@ -43,7 +43,7 @@ export interface CanvasContextValue {
   selectVersion: (nodeId: string, versionId: string) => void;
   setAnnotation: (nodeId: string, annotation: string) => void;
   startConnection: (nodeId: string) => void;
-  completeConnection: (nodeId: string) => void;
+  completeConnection: (nodeId: string, options?: { keepConnecting?: boolean }) => void;
   cancelConnection: () => void;
   removeConnection: (fromId: string, toId: string) => void;
   removeAllConnections: (nodeId: string) => void;
@@ -248,15 +248,15 @@ function canvasReducer(state: CanvasState, action: CanvasAction): CanvasState {
 
     case 'COMPLETE_CONNECTION': {
       const fromId = state.connectingFromId;
-      const toId = action.payload;
+      const { toId, keepConnecting } = action.payload;
       if (!fromId || fromId === toId) {
-        return { ...state, connectingFromId: null };
+        return { ...state, connectingFromId: keepConnecting && fromId ? fromId : null };
       }
       const target = state.nodes.find((node) => node.id === toId);
       const previousFromId = target?.connectedFrom;
       return {
         ...state,
-        connectingFromId: null,
+        connectingFromId: keepConnecting ? fromId : null,
         nodes: state.nodes.map((node) => {
           if (node.id === toId) {
             return {
@@ -380,8 +380,11 @@ function CanvasProvider({ children }: CanvasProviderProps) {
         dispatch({ type: 'SET_ANNOTATION', payload: { nodeId, annotation } }),
       startConnection: (nodeId: string) =>
         dispatch({ type: 'START_CONNECTION', payload: nodeId }),
-      completeConnection: (nodeId: string) =>
-        dispatch({ type: 'COMPLETE_CONNECTION', payload: nodeId }),
+      completeConnection: (nodeId: string, options?: { keepConnecting?: boolean }) =>
+        dispatch({
+          type: 'COMPLETE_CONNECTION',
+          payload: { toId: nodeId, keepConnecting: options?.keepConnecting },
+        }),
       cancelConnection: () => dispatch({ type: 'CANCEL_CONNECTION' }),
       removeConnection: (fromId: string, toId: string) =>
         dispatch({ type: 'REMOVE_CONNECTION', payload: { fromId, toId } }),

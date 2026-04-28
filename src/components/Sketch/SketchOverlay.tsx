@@ -13,6 +13,14 @@ export interface SketchOverlayProps {
   mode?: 'inpaint' | 'mask';  // inpaint: white = redraw area, mask: white = keep area (cutout)
 }
 
+const MIN_BRUSH_SIZE = 5;
+const MAX_BRUSH_SIZE = 100;
+const BRUSH_PREVIEW_OPACITY = 0.72;
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
 export function SketchOverlay({
   originalImageData,
   brushSize: initialBrushSize = 30,
@@ -28,9 +36,46 @@ export function SketchOverlay({
   const lastPosRef = useRef({ x: 0, y: 0 });
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const maskContextRef = useRef<CanvasRenderingContext2D | null>(null);
+  const imageScaleRef = useRef(1);
+  const brushSizeRef = useRef(initialBrushSize);
+  const brushResizeRef = useRef<{
+    startX: number;
+    startY: number;
+    startSize: number;
+  } | null>(null);
 
   const [brushSize, setBrushSize] = useState(initialBrushSize);
+  const [brushSizeHint, setBrushSizeHint] = useState<{
+    x: number;
+    y: number;
+    size: number;
+  } | null>(null);
   const [imageLoaded, setImageLoaded] = useState(false);
+
+  const configurePreviewContext = useCallback((ctx: CanvasRenderingContext2D) => {
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = `rgba(255, 255, 255, ${BRUSH_PREVIEW_OPACITY})`;
+    ctx.lineWidth = brushSizeRef.current;
+  }, []);
+
+  const configureMaskContext = useCallback((ctx: CanvasRenderingContext2D) => {
+    const scale = imageScaleRef.current || 1;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = brushSizeRef.current / scale;
+  }, []);
+
+  const fillMaskCanvas = useCallback(() => {
+    const maskCanvas = maskCanvasRef.current;
+    const maskContext = maskContextRef.current;
+    if (!maskCanvas || !maskContext) return;
+
+    maskContext.fillStyle = "#000000";
+    maskContext.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+    configureMaskContext(maskContext);
+  }, [configureMaskContext]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -40,30 +85,31 @@ export function SketchOverlay({
     if (!ctx) return;
 
     contextRef.current = ctx;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.72)";
-    ctx.lineWidth = brushSize;
+    configurePreviewContext(ctx);
 
-    // Create separate mask canvas for mask mode
     const maskCanvas = document.createElement("canvas");
     maskCanvas.width = canvas.width;
     maskCanvas.height = canvas.height;
     maskCanvasRef.current = maskCanvas;
     maskContextRef.current = maskCanvas.getContext("2d");
-  }, []);
+    if (maskContextRef.current) {
+      fillMaskCanvas();
+    }
+  }, [configurePreviewContext, fillMaskCanvas]);
 
   useEffect(() => {
+    brushSizeRef.current = brushSize;
     if (contextRef.current) {
-      contextRef.current.lineWidth = brushSize;
+      configurePreviewContext(contextRef.current);
     }
     if (maskContextRef.current) {
-      maskContextRef.current.lineWidth = brushSize;
+      configureMaskContext(maskContextRef.current);
     }
-  }, [brushSize]);
+  }, [brushSize, configureMaskContext, configurePreviewContext]);
 
   useEffect(() => {
     const img = new Image();
+    setImageLoaded(false);
     img.onload = () => {
       imageRef.current = img;
       setImageLoaded(true);
@@ -73,14 +119,18 @@ export function SketchOverlay({
         const containerWidth = containerRect.width;
         const containerHeight = containerRect.height;
 
+        const availableWidth = Math.max(containerWidth - 48, 280);
+        const availableHeight = Math.max(containerHeight - 260, 240);
+
         const scale = Math.min(
-          containerWidth / img.width,
-          containerHeight / img.height,
+          availableWidth / img.width,
+          availableHeight / img.height,
           1
         );
 
         const width = Math.round(img.width * scale);
         const height = Math.round(img.height * scale);
+        imageScaleRef.current = scale || 1;
 
         const canvas = canvasRef.current;
         if (canvas) {
@@ -90,28 +140,23 @@ export function SketchOverlay({
           canvas.style.height = `${height}px`;
         }
 
-        // Update mask canvas size
         if (maskCanvasRef.current && canvas) {
-          maskCanvasRef.current.width = canvas.width;
-          maskCanvasRef.current.height = canvas.height;
+          maskCanvasRef.current.width = img.width;
+          maskCanvasRef.current.height = img.height;
           maskContextRef.current = maskCanvasRef.current.getContext("2d");
           if (maskContextRef.current) {
-            maskContextRef.current.fillStyle = "#000000";
-            maskContextRef.current.fillRect(0, 0, canvas.width, canvas.height);
-            maskContextRef.current.lineCap = "round";
-            maskContextRef.current.lineJoin = "round";
-            maskContextRef.current.strokeStyle = "#ffffff";
-            maskContextRef.current.lineWidth = brushSize;
+            fillMaskCanvas();
           }
         }
 
         if (contextRef.current) {
+          configurePreviewContext(contextRef.current);
           contextRef.current.drawImage(img, 0, 0, width, height);
         }
       }
     };
     img.src = originalImageData;
-  }, [originalImageData]);
+  }, [configurePreviewContext, fillMaskCanvas, originalImageData]);
 
   const getCanvasCoords = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
@@ -124,29 +169,106 @@ export function SketchOverlay({
     };
   }, []);
 
+  const toMaskCoords = useCallback((point: { x: number; y: number }) => {
+    const scale = imageScaleRef.current || 1;
+    return {
+      x: point.x / scale,
+      y: point.y / scale,
+    };
+  }, []);
+
+  const drawBrushDot = useCallback((point: { x: number; y: number }) => {
+    if (!contextRef.current || !maskContextRef.current) return;
+
+    contextRef.current.beginPath();
+    contextRef.current.arc(point.x, point.y, brushSize / 2, 0, Math.PI * 2);
+    contextRef.current.fillStyle = `rgba(255, 255, 255, ${BRUSH_PREVIEW_OPACITY})`;
+    contextRef.current.fill();
+
+    const maskPoint = toMaskCoords(point);
+    const maskRadius = brushSize / 2 / (imageScaleRef.current || 1);
+    maskContextRef.current.beginPath();
+    maskContextRef.current.arc(maskPoint.x, maskPoint.y, maskRadius, 0, Math.PI * 2);
+    maskContextRef.current.fillStyle = "#ffffff";
+    maskContextRef.current.fill();
+    configureMaskContext(maskContextRef.current);
+  }, [brushSize, configureMaskContext, toMaskCoords]);
+
+  const updateBrushSizeFromDrag = useCallback((event: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!brushResizeRef.current) return;
+
+    event.preventDefault();
+    const deltaX = event.clientX - brushResizeRef.current.startX;
+    const deltaY = event.clientY - brushResizeRef.current.startY;
+    const nextBrushSize = clamp(
+      Math.round(brushResizeRef.current.startSize + (deltaX - deltaY) / 2),
+      MIN_BRUSH_SIZE,
+      MAX_BRUSH_SIZE,
+    );
+
+    setBrushSize(nextBrushSize);
+    setBrushSizeHint({
+      x: event.clientX,
+      y: event.clientY,
+      size: nextBrushSize,
+    });
+  }, []);
+
+  const stopBrushResize = useCallback(() => {
+    brushResizeRef.current = null;
+    setBrushSizeHint(null);
+  }, []);
+
   const startDrawing = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (e.button === 2 && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      brushResizeRef.current = {
+        startX: e.clientX,
+        startY: e.clientY,
+        startSize: brushSize,
+      };
+      setBrushSizeHint({
+        x: e.clientX,
+        y: e.clientY,
+        size: brushSize,
+      });
+      return;
+    }
+
+    if (e.button !== 0) return;
     isDrawingRef.current = true;
     lastPosRef.current = getCanvasCoords(e);
-  }, [getCanvasCoords]);
+    drawBrushDot(lastPosRef.current);
+  }, [brushSize, drawBrushDot, getCanvasCoords]);
 
   const draw = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (brushResizeRef.current) {
+      updateBrushSizeFromDrag(e);
+      return;
+    }
+
     if (!isDrawingRef.current || !contextRef.current || !maskContextRef.current) return;
 
     const currentPos = getCanvasCoords(e);
+    const lastMaskPos = toMaskCoords(lastPosRef.current);
+    const currentMaskPos = toMaskCoords(currentPos);
+
     contextRef.current.beginPath();
     contextRef.current.moveTo(lastPosRef.current.x, lastPosRef.current.y);
     contextRef.current.lineTo(currentPos.x, currentPos.y);
     contextRef.current.stroke();
+
     maskContextRef.current.beginPath();
-    maskContextRef.current.moveTo(lastPosRef.current.x, lastPosRef.current.y);
-    maskContextRef.current.lineTo(currentPos.x, currentPos.y);
+    maskContextRef.current.moveTo(lastMaskPos.x, lastMaskPos.y);
+    maskContextRef.current.lineTo(currentMaskPos.x, currentMaskPos.y);
     maskContextRef.current.stroke();
     lastPosRef.current = currentPos;
-  }, [getCanvasCoords]);
+  }, [getCanvasCoords, toMaskCoords, updateBrushSizeFromDrag]);
 
   const stopDrawing = useCallback(() => {
     isDrawingRef.current = false;
-  }, []);
+    stopBrushResize();
+  }, [stopBrushResize]);
 
   const handleComplete = useCallback(() => {
     const canvas = canvasRef.current;
@@ -154,44 +276,43 @@ export function SketchOverlay({
 
     if (!maskCanvasRef.current) return;
     onComplete(canvasToBase64(maskCanvasRef.current));
-  }, [onComplete, mode]);
+  }, [onComplete]);
 
   const handleClear = useCallback(() => {
     if (!contextRef.current || !imageRef.current) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     contextRef.current.clearRect(0, 0, canvas.width, canvas.height);
+    configurePreviewContext(contextRef.current);
     contextRef.current.drawImage(imageRef.current, 0, 0, canvas.width, canvas.height);
-    if (maskContextRef.current) {
-      maskContextRef.current.fillStyle = "#000000";
-      maskContextRef.current.fillRect(0, 0, canvas.width, canvas.height);
-    }
-  }, []);
+    fillMaskCanvas();
+  }, [configurePreviewContext, fillMaskCanvas]);
 
-  const title = mode === 'mask' ? 'Draw to Cutout' : 'Draw to Edit';
+  const title = mode === 'mask' ? 'Mark Cutout Subject' : 'Mark Edit Area';
   const subtitle = mode === 'mask'
-    ? 'Paint over the subject you want AI to cut out'
-    : 'Paint over the area you want to modify';
+    ? 'Paint the subject to keep as a clean cutout'
+    : 'Paint the area that should change';
 
   return (
     <div
       ref={containerRef}
-      className="fixed inset-0 z-50 flex items-center justify-center"
+      className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-4 p-4"
       style={{ backgroundColor: 'rgba(0, 0, 0, 0.8)' }}
     >
-      <div className="flex flex-col items-center gap-6 max-w-3xl w-full mx-4">
-        <div className="text-center">
-          <h2 className="text-2xl font-display font-medium text-white mb-2">{title}</h2>
-          <p className="text-sm font-sans text-silver">{subtitle}</p>
-        </div>
+      <div className="text-center shrink-0">
+        <h2 className="text-2xl font-display font-medium text-white mb-2">{title}</h2>
+        <p className="text-sm font-sans text-silver">{subtitle}</p>
+      </div>
 
-        <div className="relative bg-white rounded-container overflow-hidden">
+      <div className="flex min-h-0 w-full max-w-5xl flex-1 items-center justify-center">
+        <div className="relative max-h-full max-w-full bg-white rounded-container overflow-hidden">
           <canvas
             ref={canvasRef}
             onMouseDown={startDrawing}
             onMouseMove={draw}
             onMouseUp={stopDrawing}
             onMouseLeave={stopDrawing}
+            onContextMenu={(event) => event.preventDefault()}
             className="cursor-crosshair"
             style={{ display: imageLoaded ? 'block' : 'none' }}
           />
@@ -201,40 +322,39 @@ export function SketchOverlay({
             </div>
           )}
         </div>
+      </div>
 
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-3">
-            <span className="text-sm font-sans text-silver">Brush Size</span>
-            <input
-              type="range"
-              min={5}
-              max={100}
-              value={brushSize}
-              onChange={(e) => setBrushSize(Number(e.target.value))}
-              className="w-32 h-2 bg-light-gray rounded-pill appearance-none cursor-pointer"
-            />
-            <span className="text-sm font-sans text-white min-w-[40px]">{brushSize}</span>
-          </div>
+      {brushSizeHint && (
+        <div
+          className="pointer-events-none fixed z-[60] rounded-pill border border-white/15 bg-darkest/90 px-3 py-1.5 text-xs font-mono text-white shadow-xl"
+          style={{
+            left: brushSizeHint.x + 14,
+            top: brushSizeHint.y + 14,
+          }}
+        >
+          Brush {brushSizeHint.size}
         </div>
+      )}
 
-        <div className="flex items-center gap-3">
+      <div className="flex w-full max-w-sm shrink-0 items-center justify-center rounded-container border border-white/15 bg-darkest/95 px-3 py-3 shadow-xl">
+        <div className="flex items-center gap-2">
           <button
             onClick={handleClear}
-            className="px-6 py-3 text-sm font-sans font-normal bg-white text-near-black rounded-pill border border-light-gray hover:bg-snow transition-colors"
+            className="h-12 px-5 text-sm font-sans font-normal bg-white/8 text-white rounded-pill border border-white/15 hover:bg-white/14 transition-colors"
           >
             Clear
           </button>
           <button
             onClick={onCancel}
-            className="px-6 py-3 text-sm font-sans font-normal bg-white text-near-black rounded-pill border border-light-gray hover:bg-snow transition-colors"
+            className="h-12 px-5 text-sm font-sans font-normal bg-white/8 text-white rounded-pill border border-white/15 hover:bg-white/14 transition-colors"
           >
-            Cancel
+            Exit
           </button>
           <button
             onClick={handleComplete}
-            className="px-6 py-3 text-sm font-sans font-medium bg-white text-black rounded-pill hover:bg-light-gray transition-colors"
+            className="h-12 px-6 text-sm font-sans font-medium bg-white text-black rounded-pill hover:bg-light-gray transition-colors"
           >
-            Complete
+            Submit
           </button>
         </div>
       </div>
