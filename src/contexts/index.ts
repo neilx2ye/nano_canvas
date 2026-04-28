@@ -4,5 +4,9 @@ export { CanvasContext, CanvasProvider, useCanvasContext } from "./CanvasContext
 export type { CanvasContextValue } from "./CanvasContext";
 export { TokenContext, TokenProvider, useTokenContext } from "./TokenContext";
 export type { TokenContextValue } from "./TokenContext";
-export { AutoSaveContext, AutoSaveProvider, useAutoSaveContext } from "./AutoSaveContext";
-export type { AutoSaveContextValue } from "./AutoSaveContext";
+export {
+  ProjectArchiveContext,
+  ProjectArchiveProvider,
+  useProjectArchiveContext,
+} from "./ProjectArchiveContext";
+export type { ProjectArchiveContextValue } from "./ProjectArchiveContext";

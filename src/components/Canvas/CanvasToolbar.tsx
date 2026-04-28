@@ -4,9 +4,9 @@ import { FabricImage, type Canvas } from "fabric";
 import { EditOverlay, SketchOverlay, SketchPromptInput, type EditOverlaySubmitPayload } from "../Sketch";
 import { ImageAnnotationModal } from "./ImageAnnotationModal";
 import {
-  useAutoSaveContext,
   useCanvasContext,
   useConfigContext,
+  useProjectArchiveContext,
   useTokenContext,
 } from "../../contexts";
 import {
@@ -36,7 +36,7 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
   } = useCanvasContext();
   const { config } = useConfigContext();
   const { recordUsage } = useTokenContext();
-  const { saveGeneratedImage } = useAutoSaveContext();
+  const { archiveGeneratedImage } = useProjectArchiveContext();
 
   const confirmClearRef = useRef(false);
   const confirmTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
@@ -221,9 +221,10 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
     (resultImageData: string, tokenUsed: number, prompt: string) => {
       if (!selectedNodeId) return;
       const createdAt = new Date();
+      const versionId = crypto.randomUUID();
 
       const version: CanvasNodeVersion = {
-        id: crypto.randomUUID(),
+        id: versionId,
         imageData: resultImageData,
         createdAt,
         prompt,
@@ -232,11 +233,28 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
       };
 
       addVersion(selectedNodeId, version, true);
-      void saveGeneratedImage(resultImageData, prompt, { createdAt });
+      void archiveGeneratedImage({
+        imageData: resultImageData,
+        prompt,
+        nodeId: selectedNodeId,
+        versionId,
+        operation: config.maskMode ? 'mask' : 'sketch',
+        model: config.model,
+        tokenUsed,
+        createdAt,
+      });
       recordUsage(tokenUsed);
       handleSketchCancel();
     },
-    [addVersion, config.model, handleSketchCancel, recordUsage, saveGeneratedImage, selectedNodeId],
+    [
+      addVersion,
+      archiveGeneratedImage,
+      config.maskMode,
+      config.model,
+      handleSketchCancel,
+      recordUsage,
+      selectedNodeId,
+    ],
   );
 
   const handleInpaintCancel = useCallback(() => {
@@ -291,8 +309,9 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
 
         const createdAt = new Date();
         const versionPrompt = `Edit region: ${note}`;
+        const versionId = crypto.randomUUID();
         const version: CanvasNodeVersion = {
-          id: crypto.randomUUID(),
+          id: versionId,
           imageData: response.image,
           createdAt,
           prompt: versionPrompt,
@@ -301,7 +320,16 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
         };
 
         addVersion(selectedNodeId, version, true);
-        void saveGeneratedImage(response.image, versionPrompt, { createdAt });
+        void archiveGeneratedImage({
+          imageData: response.image,
+          prompt: versionPrompt,
+          nodeId: selectedNodeId,
+          versionId,
+          operation: 'edit',
+          model: config.model,
+          tokenUsed: response.token_used,
+          createdAt,
+        });
         recordUsage(response.token_used);
         setShowEdit(false);
       } catch (err) {
@@ -310,7 +338,7 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
         setEditLoading(false);
       }
     },
-    [addVersion, config, recordUsage, saveGeneratedImage, selectedNode, selectedNodeId],
+    [addVersion, archiveGeneratedImage, config, recordUsage, selectedNode, selectedNodeId],
   );
 
   useEffect(() => {

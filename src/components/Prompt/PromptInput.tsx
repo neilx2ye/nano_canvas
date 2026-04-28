@@ -5,9 +5,9 @@
 
 import { useState, useCallback, type KeyboardEvent } from "react";
 import {
-  useAutoSaveContext,
   useConfigContext,
   useCanvasContext,
+  useProjectArchiveContext,
   useTokenContext,
 } from "../../contexts";
 import { generateImage, generateImageWithThinking, hasApiKey, isThinkingSupported } from "../../services/nanoBananaApi";
@@ -24,7 +24,7 @@ export function PromptInput() {
   const { config, updateConfig } = useConfigContext();
   const { nodes, addNode, selectedNodeId } = useCanvasContext();
   const { recordUsage } = useTokenContext();
-  const { saveGeneratedImage } = useAutoSaveContext();
+  const { archiveGeneratedImage } = useProjectArchiveContext();
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -98,9 +98,10 @@ export function PromptInput() {
       }
 
       const createdAt = new Date();
+      const nodeId = crypto.randomUUID();
       const versionId = crypto.randomUUID();
       const newNode: CanvasNode = {
-        id: crypto.randomUUID(),
+        id: nodeId,
         imageData: response.image,
         position: { x: Math.random() * 200 + 100, y: Math.random() * 200 + 100 },
         scale: 1,
@@ -123,7 +124,16 @@ export function PromptInput() {
       };
 
       addNode(newNode);
-      void saveGeneratedImage(response.image, config.prompt, { createdAt });
+      void archiveGeneratedImage({
+        imageData: response.image,
+        prompt: config.prompt,
+        nodeId,
+        versionId,
+        operation: 'generate',
+        model: config.model,
+        tokenUsed: response.token_used,
+        createdAt,
+      });
       recordUsage(response.token_used);
       updateConfig({ prompt: "" });
 
@@ -134,7 +144,7 @@ export function PromptInput() {
     } finally {
       setLoading(false);
     }
-  }, [config, addNode, recordUsage, saveGeneratedImage, updateConfig, getGenerationReferences]);
+  }, [config, addNode, archiveGeneratedImage, recordUsage, updateConfig, getGenerationReferences]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {

@@ -1,9 +1,9 @@
 import { useRef, useEffect, forwardRef, useImperativeHandle, useState, useCallback } from 'react';
 import { Canvas, FabricImage, Point, type TPointerEventInfo, type TPointerEvent } from 'fabric';
 import {
-  useAutoSaveContext,
   useCanvasContext,
   useConfigContext,
+  useProjectArchiveContext,
   useTokenContext,
 } from '../../contexts';
 import { ImageNodeMenu } from './ImageNodeMenu';
@@ -98,7 +98,7 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
 
     const { config } = useConfigContext();
     const { recordUsage } = useTokenContext();
-    const { saveGeneratedImage } = useAutoSaveContext();
+    const { archiveGeneratedImage } = useProjectArchiveContext();
 
     const [menuState, setMenuState] = useState({
       visible: false,
@@ -161,6 +161,8 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
         backgroundColor: '#ffffff',
         selection: true,
         preserveObjectStacking: true,
+        fireRightClick: true,
+        fireMiddleClick: true,
       });
 
       fabricCanvasRef.current = canvas;
@@ -407,6 +409,11 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
         if (!target.closest('.canvas-container')) return;
 
         event.preventDefault();
+        if (hasDraggedRef.current) {
+          hasDraggedRef.current = false;
+          return;
+        }
+
         const pointer = canvas.getPointer(event);
 
         for (const object of canvas.getObjects()) {
@@ -486,9 +493,9 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
         clickStartRef.current = { x: event.clientX, y: event.clientY, targetId };
         hasDraggedRef.current = false;
 
-        const isBoardRightDrag = event.button === 2 && !targetId;
+        const isRightDrag = event.button === 2;
 
-        if (spacePressed || event.button === 1 || isBoardRightDrag) {
+        if (spacePressed || event.button === 1 || isRightDrag) {
           event.preventDefault();
           isPanningRef.current = true;
           canvas.defaultCursor = 'grabbing';
@@ -620,8 +627,9 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
               });
 
           const createdAt = new Date();
+          const versionId = crypto.randomUUID();
           const version: CanvasNodeVersion = {
-            id: crypto.randomUUID(),
+            id: versionId,
             imageData: response.image,
             createdAt,
             prompt,
@@ -630,13 +638,22 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
           };
 
           addVersion(node.id, version, true);
-          void saveGeneratedImage(response.image, prompt, { createdAt });
+          void archiveGeneratedImage({
+            imageData: response.image,
+            prompt,
+            nodeId: node.id,
+            versionId,
+            operation: 'regenerate',
+            model,
+            tokenUsed: response.token_used,
+            createdAt,
+          });
           recordUsage(response.token_used);
         } finally {
           setRegeneratingNodeId(null);
         }
       },
-      [addVersion, config, getNodeById, menuState.nodeId, nodes, recordUsage, saveGeneratedImage],
+      [addVersion, archiveGeneratedImage, config, getNodeById, menuState.nodeId, nodes, recordUsage],
     );
 
     const handleMenuDelete = useCallback(() => {

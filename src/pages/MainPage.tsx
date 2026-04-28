@@ -5,7 +5,7 @@ import {
   ParamControls,
   TokenDisplay,
 } from "../components/Controls";
-import { ApiKeyConfig, AutoSaveFolder } from "../components/Settings";
+import { ApiKeyConfig, ProjectArchivePanel } from "../components/Settings";
 import { PromptInput as MainPromptInput, RefImageUpload } from "../components/Prompt";
 import { InfiniteCanvas, CanvasToolbar } from "../components/Canvas";
 import type { InfiniteCanvasHandle } from "../components/Canvas";
@@ -62,7 +62,7 @@ function MainPage() {
           <div className="p-6 flex flex-col gap-6">
             <ApiKeyConfig />
             <div className="h-px bg-light-gray" />
-            <AutoSaveFolder />
+            <ProjectArchivePanel />
             <div className="h-px bg-light-gray" />
             <ModelSelector />
             <div className="h-px bg-light-gray" />

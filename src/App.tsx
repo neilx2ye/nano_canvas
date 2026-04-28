@@ -1,7 +1,7 @@
 ﻿import {
   CanvasProvider,
   ConfigProvider,
-  AutoSaveProvider,
+  ProjectArchiveProvider,
   TokenProvider,
 } from "./contexts";
 import MainPage from "./pages/MainPage";
@@ -10,11 +10,11 @@ function App() {
   return (
     <CanvasProvider>
       <ConfigProvider>
-        <AutoSaveProvider>
+        <ProjectArchiveProvider>
           <TokenProvider>
             <MainPage />
           </TokenProvider>
-        </AutoSaveProvider>
+        </ProjectArchiveProvider>
       </ConfigProvider>
     </CanvasProvider>
   );

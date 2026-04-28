@@ -1,2 +1,2 @@
 export { ApiKeyConfig } from './ApiKeyConfig';
-export { AutoSaveFolder } from './AutoSaveFolder';
+export { ProjectArchivePanel } from './ProjectArchivePanel';
