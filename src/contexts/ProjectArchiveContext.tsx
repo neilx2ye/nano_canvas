@@ -40,6 +40,7 @@ interface FileSystemDirectoryHandleLike {
     name: string,
     options?: { create?: boolean },
   ) => Promise<FileSystemFileHandleLike>;
+  removeEntry?: (name: string, options?: { recursive?: boolean }) => Promise<void>;
   queryPermission?: (descriptor?: FileSystemPermissionDescriptor) => Promise<PermissionState>;
   requestPermission?: (descriptor?: FileSystemPermissionDescriptor) => Promise<PermissionState>;
 }
@@ -154,6 +155,7 @@ export interface ProjectArchiveContextValue {
   selectProjectDirectory: () => Promise<void>;
   clearProjectDirectory: () => void;
   archiveGeneratedImage: (request: ArchiveImageRequest) => Promise<void>;
+  deleteArchivedNodeImages: (nodes: CanvasNode[]) => Promise<void>;
 }
 
 const DB_NAME = 'nano_canvas_project_archive';
@@ -508,6 +510,24 @@ export function ProjectArchiveProvider({ children }: { children: React.ReactNode
     [getImageDirectory],
   );
 
+  const removeImageFile = useCallback(
+    async (projectHandle: FileSystemDirectoryHandleLike, fileName: string) => {
+      const imageDirectory = await getImageDirectory(projectHandle);
+      if (!imageDirectory.removeEntry) {
+        throw new Error('Deleting files from the project folder is not supported in this browser.');
+      }
+
+      try {
+        await imageDirectory.removeEntry(fileName);
+      } catch (err) {
+        if (!isNotFoundError(err)) {
+          throw err;
+        }
+      }
+    },
+    [getImageDirectory],
+  );
+
   const buildProjectConfigDocument = useCallback((): ProjectConfigDocument | null => {
     if (!projectHandleRef.current) return null;
 
@@ -699,6 +719,68 @@ export function ProjectArchiveProvider({ children }: { children: React.ReactNode
       await archiveImage(request);
     },
     [archiveImage],
+  );
+
+  const deleteArchivedNodeImages = useCallback(
+    async (deletedNodes: CanvasNode[]) => {
+      const projectHandle = projectHandleRef.current;
+      if (!projectHandle || deletedNodes.length === 0) return;
+
+      const hasPermission = await ensureWritePermission(projectHandle);
+      if (!hasPermission) {
+        setError('Write permission was not granted for this project folder.');
+        return;
+      }
+
+      const deletedNodeIds = new Set(deletedNodes.map((node) => node.id));
+      const deletedVersionIds = new Set(
+        deletedNodes.flatMap((node) => getNodeVersions(node).map((version) => version.id)),
+      );
+      const recordsToDelete = generationRecordsRef.current.filter(
+        (record) => deletedNodeIds.has(record.nodeId) || deletedVersionIds.has(record.versionId),
+      );
+      if (recordsToDelete.length === 0) {
+        scheduleProjectConfigWrite();
+        return;
+      }
+
+      const endOperation = startOperation();
+      setError(null);
+
+      try {
+        const uniqueFileNames = Array.from(
+          new Set(
+            recordsToDelete
+              .filter((record) => record.status === 'saved')
+              .map((record) => record.fileName),
+          ),
+        );
+        const deletedRecordIds = new Set(recordsToDelete.map((record) => record.id));
+        const nextAssets = { ...assetsRef.current };
+        recordsToDelete.forEach((record) => {
+          delete nextAssets[record.versionId];
+        });
+        assetsRef.current = nextAssets;
+        generationRecordsRef.current = generationRecordsRef.current.filter(
+          (record) => !deletedRecordIds.has(record.id),
+        );
+
+        await Promise.all(uniqueFileNames.map((fileName) => removeImageFile(projectHandle, fileName)));
+        setLastSavedLabel(
+          uniqueFileNames.length > 1
+            ? `Deleted ${uniqueFileNames.length} images`
+            : uniqueFileNames[0]
+              ? `Deleted ${IMAGE_DIRECTORY_NAME}/${uniqueFileNames[0]}`
+              : CONFIG_FILE_NAME,
+        );
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Could not delete archived image files.');
+      } finally {
+        scheduleProjectConfigWrite();
+        endOperation();
+      }
+    },
+    [removeImageFile, scheduleProjectConfigWrite, startOperation],
   );
 
   const restoreProjectFromConfig = useCallback(
@@ -956,10 +1038,12 @@ export function ProjectArchiveProvider({ children }: { children: React.ReactNode
       selectProjectDirectory,
       clearProjectDirectory,
       archiveGeneratedImage,
+      deleteArchivedNodeImages,
     }),
     [
       archiveGeneratedImage,
       clearProjectDirectory,
+      deleteArchivedNodeImages,
       error,
       isReady,
       isSupported,

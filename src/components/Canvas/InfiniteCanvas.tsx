@@ -17,7 +17,9 @@ import {
 import {
   buildPromptWithReferences,
   canvasNodesToPromptReferences,
+  fileToBase64,
   getOrderedNodeChain,
+  validateImageFile,
   type PromptReference,
 } from '../../utils';
 import { sanitizeGenerationConfig } from '../../constants/geminiImageModels';
@@ -26,6 +28,7 @@ import type { CanvasNode, CanvasNodeVersion, ModelType } from '../../types';
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 5;
 const NODE_SIZE = 256;
+const PASTE_OFFSET = 36;
 
 interface InfiniteCanvasProps {
   className?: string;
@@ -40,6 +43,39 @@ type NodePosition = { x: number; y: number; width: number; height: number };
 type CanvasPoint = { x: number; y: number };
 type IdentifiedFabricImage = FabricImage & { id: string; imageData?: string };
 type FabricObjectCollection = { getObjects: () => unknown[] };
+
+function getClipboardImageFiles(clipboardData: DataTransfer | null): File[] {
+  if (!clipboardData) return [];
+
+  const imageItemFiles = Array.from(clipboardData.items)
+    .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => Boolean(file));
+  const sourceFiles = imageItemFiles.length > 0
+    ? imageItemFiles
+    : Array.from(clipboardData.files).filter((file) => file.type.startsWith('image/'));
+  const filesBySignature = new Map(sourceFiles.map((file) => [`${file.type}:${file.size}`, file]));
+
+  return Array.from(filesBySignature.values());
+}
+
+function isEditablePasteTarget(target: EventTarget | null): boolean {
+  const targetElement = target instanceof Element ? target : null;
+  const activeElement = document.activeElement instanceof Element ? document.activeElement : null;
+  const elements = [targetElement, activeElement];
+
+  return elements.some((element) => {
+    if (!element) return false;
+    const editableElement = element instanceof HTMLElement
+      ? element
+      : element.closest('[contenteditable]');
+
+    return Boolean(
+      element.closest('input, textarea, select') ||
+        (editableElement instanceof HTMLElement && editableElement.isContentEditable),
+    );
+  });
+}
 
 function isIdentifiedFabricImage(object: unknown): object is IdentifiedFabricImage {
   return object instanceof FabricImage && typeof (object as { id?: unknown }).id === 'string';
@@ -126,10 +162,12 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
     const overlayFrameRef = useRef<number | null>(null);
     const loadingNodeIdsRef = useRef<Set<string>>(new Set());
     const keepConnectingUntilKeyUpRef = useRef(false);
+    const pasteErrorTimeoutRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
 
     const {
       nodes,
       connectingFromId,
+      addNode,
       selectNode,
       selectNodes,
       updateNode,
@@ -147,7 +185,7 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
 
     const { config } = useConfigContext();
     const { recordUsage } = useTokenContext();
-    const { archiveGeneratedImage } = useProjectArchiveContext();
+    const { archiveGeneratedImage, deleteArchivedNodeImages } = useProjectArchiveContext();
 
     const [menuState, setMenuState] = useState({
       visible: false,
@@ -160,6 +198,7 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
       currentAnnotation: '',
     });
     const [regeneratingNodeId, setRegeneratingNodeId] = useState<string | null>(null);
+    const [pasteError, setPasteError] = useState<string | null>(null);
     const [, setOverlayRevision] = useState(0);
 
     useImperativeHandle(ref, () => ({
@@ -203,6 +242,61 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
       scheduleOverlayRefresh();
     }, [scheduleOverlayRefresh]);
 
+    const getPastePosition = useCallback((index: number): CanvasPoint => {
+      const canvas = fabricCanvasRef.current;
+      const center = canvas?.getVpCenter() || new Point(NODE_SIZE / 2, NODE_SIZE / 2);
+
+      return {
+        x: center.x - NODE_SIZE / 2 + index * PASTE_OFFSET,
+        y: center.y - NODE_SIZE / 2 + index * PASTE_OFFSET,
+      };
+    }, []);
+
+    const showPasteError = useCallback((message: string) => {
+      setPasteError(message);
+      if (pasteErrorTimeoutRef.current) {
+        window.clearTimeout(pasteErrorTimeoutRef.current);
+      }
+      pasteErrorTimeoutRef.current = window.setTimeout(() => {
+        setPasteError(null);
+        pasteErrorTimeoutRef.current = null;
+      }, 3500);
+    }, []);
+
+    const createPastedNode = useCallback((file: File, imageData: string, index: number): CanvasNode => {
+      const createdAt = new Date();
+      const nodeId = crypto.randomUUID();
+      const versionId = crypto.randomUUID();
+      const fileBaseName = file.name.replace(/\.[^.]+$/, '').trim();
+      const annotation = fileBaseName && fileBaseName.toLowerCase() !== 'image'
+        ? fileBaseName
+        : 'Pasted image';
+
+      return {
+        id: nodeId,
+        imageData,
+        position: getPastePosition(index),
+        scale: 1,
+        rotation: 0,
+        createdAt,
+        prompt: '',
+        model: 'uploaded',
+        tokenUsed: 0,
+        annotation,
+        activeVersionId: versionId,
+        versions: [
+          {
+            id: versionId,
+            imageData,
+            createdAt,
+            prompt: '',
+            model: 'uploaded',
+            tokenUsed: 0,
+          },
+        ],
+      };
+    }, [getPastePosition]);
+
     useEffect(() => {
       if (!canvasRef.current || fabricCanvasRef.current) return;
 
@@ -244,6 +338,89 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
         fabricCanvasRef.current = null;
       };
     }, [updateOverlayTransform]);
+
+    useEffect(() => {
+      const handlePaste = (event: ClipboardEvent) => {
+        const canvas = fabricCanvasRef.current;
+        const container = containerRef.current;
+        if (!canvas || !container || isEditablePasteTarget(event.target)) return;
+
+        const targetNode = event.target instanceof Node ? event.target : null;
+        const activeNode = document.activeElement instanceof Node ? document.activeElement : null;
+        const isWorkspacePasteTarget = Boolean(
+          (targetNode && container.contains(targetNode)) ||
+            (activeNode && container.contains(activeNode)),
+        );
+        if (!isWorkspacePasteTarget) return;
+
+        const imageFiles = getClipboardImageFiles(event.clipboardData);
+        if (imageFiles.length === 0) return;
+
+        event.preventDefault();
+        closeMenu();
+        if (pasteErrorTimeoutRef.current) {
+          window.clearTimeout(pasteErrorTimeoutRef.current);
+          pasteErrorTimeoutRef.current = null;
+        }
+        setPasteError(null);
+
+        void (async () => {
+          const createdNodes: CanvasNode[] = [];
+          let firstError: string | null = null;
+
+          for (let index = 0; index < imageFiles.length; index += 1) {
+            const file = imageFiles[index];
+            const label = file.name || 'Clipboard image';
+            const validation = validateImageFile(file);
+            if (!validation.valid) {
+              firstError = firstError || `${label}: ${validation.error || 'Invalid image'}`;
+              continue;
+            }
+
+            try {
+              const imageData = await fileToBase64(file);
+              const node = createPastedNode(file, imageData, index);
+              createdNodes.push(node);
+              addNode(node);
+              void archiveGeneratedImage({
+                imageData,
+                prompt: node.annotation || label,
+                nodeId: node.id,
+                versionId: node.activeVersionId || `${node.id}-initial`,
+                operation: 'upload',
+                model: 'uploaded',
+                tokenUsed: 0,
+                createdAt: node.createdAt,
+              });
+            } catch {
+              firstError = firstError || `${label}: Failed to process image`;
+            }
+          }
+
+          const lastNode = createdNodes[createdNodes.length - 1];
+          if (lastNode) {
+            selectNode(lastNode.id);
+          }
+          if (firstError) {
+            showPasteError(firstError);
+          }
+        })();
+      };
+
+      window.addEventListener('paste', handlePaste);
+      return () => {
+        window.removeEventListener('paste', handlePaste);
+      };
+    }, [addNode, archiveGeneratedImage, closeMenu, createPastedNode, selectNode, showPasteError]);
+
+    useEffect(() => {
+      return () => {
+        if (pasteErrorTimeoutRef.current) {
+          window.clearTimeout(pasteErrorTimeoutRef.current);
+          pasteErrorTimeoutRef.current = null;
+        }
+      };
+    }, []);
 
     useEffect(() => {
       const canvas = fabricCanvasRef.current;
@@ -716,14 +893,15 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
     );
 
     const handleMenuDelete = useCallback(() => {
-      if (!menuState.nodeId) return;
+      const node = menuState.nodeId ? getNodeById(menuState.nodeId) : null;
+      if (!node) return;
 
       const canvas = fabricCanvasRef.current;
       if (canvas) {
         const target = canvas.getObjects().find(
           (object) =>
             object instanceof FabricImage &&
-            (object as FabricImage & { id?: string }).id === menuState.nodeId,
+            (object as FabricImage & { id?: string }).id === node.id,
         );
         if (target) {
           canvas.remove(target);
@@ -731,9 +909,10 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
         }
       }
 
-      removeNode(menuState.nodeId);
+      removeNode(node.id);
+      void deleteArchivedNodeImages([node]);
       closeMenu();
-    }, [closeMenu, menuState.nodeId, removeNode]);
+    }, [closeMenu, deleteArchivedNodeImages, getNodeById, menuState.nodeId, removeNode]);
 
     const handleAnnotationSave = useCallback(
       (newAnnotation: string) => {
@@ -795,12 +974,20 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
     return (
       <div
         ref={containerRef}
+        tabIndex={0}
+        aria-label="Image workspace"
         className={className}
+        onMouseDown={(event) => {
+          if ((event.target as HTMLElement).closest('.canvas-container')) {
+            containerRef.current?.focus({ preventScroll: true });
+          }
+        }}
         style={{
           width: '100%',
           height: '100%',
           overflow: 'hidden',
           position: 'relative',
+          outline: 'none',
         }}
       >
         <canvas ref={canvasRef} />
@@ -839,6 +1026,12 @@ export const InfiniteCanvas = forwardRef<InfiniteCanvasHandle, InfiniteCanvasPro
             );
           })}
         </div>
+
+        {pasteError && (
+          <div className="absolute bottom-6 left-6 z-50 max-w-sm rounded-container border border-border-light bg-white px-4 py-2 text-sm font-sans text-near-black shadow-lg">
+            {pasteError}
+          </div>
+        )}
 
         {connectingFromId && (
           <div className="absolute bottom-6 right-6 z-50 bg-white text-near-black px-4 py-2 rounded-container border border-border-light shadow-lg text-sm font-sans flex items-center gap-3">

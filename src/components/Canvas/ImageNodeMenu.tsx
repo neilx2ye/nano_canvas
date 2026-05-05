@@ -212,7 +212,7 @@ export function ImageNodeMenu({
           onClick={onDelete}
           className="w-full mt-3 px-3 py-2 text-sm font-sans text-left text-red-500 rounded-container hover:bg-red-50 transition-colors"
         >
-          Delete Node
+          Delete Image
         </button>
       </div>
     </>

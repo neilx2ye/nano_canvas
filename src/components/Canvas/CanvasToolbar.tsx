@@ -49,7 +49,7 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
   } = useCanvasContext();
   const { config } = useConfigContext();
   const { recordUsage } = useTokenContext();
-  const { archiveGeneratedImage } = useProjectArchiveContext();
+  const { archiveGeneratedImage, deleteArchivedNodeImages } = useProjectArchiveContext();
 
   const confirmClearRef = useRef(false);
   const confirmTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
@@ -89,7 +89,9 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
     if (nodeIds.length === 0) return;
 
     const removedNodeIds = new Set(nodeIds);
+    const removedNodes = nodes.filter((node) => removedNodeIds.has(node.id));
     removeNodes(nodeIds);
+    void deleteArchivedNodeImages(removedNodes);
     const canvas = fabricCanvasRef.current;
     if (canvas) {
       canvas.discardActiveObject();
@@ -104,7 +106,7 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
       canvas.renderAll();
     }
     selectNodes([]);
-  }, [fabricCanvasRef, removeNodes, selectedNodeIds, selectNodes]);
+  }, [deleteArchivedNodeImages, fabricCanvasRef, nodes, removeNodes, selectedNodeIds, selectNodes]);
 
   const handleDownload = useCallback(() => {
     if (selectedNode) {
@@ -114,7 +116,9 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
 
   const handleClear = useCallback(() => {
     if (confirmClearRef.current) {
-      removeNodes(nodes.map((node) => node.id));
+      const nodesToRemove = nodes;
+      removeNodes(nodesToRemove.map((node) => node.id));
+      void deleteArchivedNodeImages(nodesToRemove);
       const canvas = fabricCanvasRef.current;
       if (canvas) {
         canvas.discardActiveObject();
@@ -133,7 +137,7 @@ export function CanvasToolbar({ fabricCanvasRef, className }: CanvasToolbarProps
     confirmTimeoutRef.current = setTimeout(() => {
       confirmClearRef.current = false;
     }, 2000);
-  }, [nodes, removeNodes, fabricCanvasRef, selectNodes]);
+  }, [deleteArchivedNodeImages, nodes, removeNodes, fabricCanvasRef, selectNodes]);
 
   const handleUpload = useCallback(() => {
     fileInputRef.current?.click();
